@@ -1,0 +1,13 @@
+Font Awesome Free 6
+
+The bundled font files in app/src/main/assets are Font Awesome Free fonts:
+- fa-solid-900.ttf
+- fa-regular-400.ttf
+- fa-brands-400.ttf
+
+The font files are licensed under the SIL Open Font License 1.1 (OFL).
+Font Awesome Free licensing and attribution details:
+https://fontawesome.com/license/free
+
+The icon glyphs used by the UI are from Font Awesome Free Solid.
+Font Awesome is a trademark of Fonticons, Inc.

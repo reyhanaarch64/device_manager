@@ -15,11 +15,14 @@ import androidx.core.content.ContextCompat
 import com.devicemanager.MainActivity
 import com.devicemanager.R
 import com.devicemanager.notifications.NotificationChannels
+import com.devicemanager.display.DisplayRepository
+import com.devicemanager.data.ActivityLogRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 
 /** Foreground owner for the user-initiated Wireless Debugging pairing/ADB session. */
 class AdbSessionService : Service() {
@@ -27,6 +30,7 @@ class AdbSessionService : Service() {
     private var step = STEP_NONE
     private var pairEndpoint: AdbEndpoint? = null
     private var statusText = "menunggu input"
+    private var displayRollbackJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -55,6 +59,8 @@ class AdbSessionService : Service() {
             ACTION_RESTORE -> restoreAfterProcessRestart()
             ACTION_DISCONNECT -> disconnect()
             ACTION_INPUT -> consumeRemoteInput(intent!!)
+            ACTION_SCHEDULE_DISPLAY_ROLLBACK -> schedulePendingDisplayRollback()
+            ACTION_KEEP_DISPLAY -> keepDisplayConfiguration()
             null -> restoreAfterProcessRestart()
         }
         return if (AdbRuntime.sessionEnabled(this)) START_STICKY else START_NOT_STICKY
@@ -132,6 +138,7 @@ class AdbSessionService : Service() {
                 step = STEP_CONNECTED
                 statusText = "terhubung"
                 showNotification("adb tersambung", endpoint.asText())
+                schedulePendingDisplayRollback()
             } else {
                 step = STEP_CONNECT_ENDPOINT
                 statusText = result.exceptionOrNull()?.message ?: "koneksi gagal"
@@ -185,6 +192,7 @@ class AdbSessionService : Service() {
                             step = STEP_CONNECTED
                             statusText = "terhubung"
                             showNotification("adb tersambung", endpoint.asText())
+                            schedulePendingDisplayRollback()
                         } else {
                             step = STEP_CONNECT_ENDPOINT
                             val reason = result.exceptionOrNull()?.message ?: "koneksi gagal"
@@ -199,7 +207,86 @@ class AdbSessionService : Service() {
         }
     }
 
+    private fun schedulePendingDisplayRollback() {
+        val pending = DisplayRepository.pendingRollback(this) ?: return
+        displayRollbackJob?.cancel()
+        displayRollbackJob = scope.launch {
+            val remaining = (pending.deadlineEpochMs - System.currentTimeMillis()).coerceAtLeast(0L)
+            if (remaining > 0L) kotlinx.coroutines.delay(remaining)
+            val latest = DisplayRepository.pendingRollback(this@AdbSessionService) ?: return@launch
+            if (!AdbRuntime.state.value.connected) {
+                showNotification("pemulihan display menunggu koneksi", "rollback tersimpan tetapi sesi adb terputus. sambungkan kembali untuk memulihkan konfigurasi sebelumnya")
+                return@launch
+            }
+            var result = DisplayRepository.restore(latest.previous)
+            if (result.isFailure && AdbRuntime.state.value.connected) {
+                kotlinx.coroutines.delay(1_000L)
+                result = DisplayRepository.restore(latest.previous)
+            }
+            if (result.isSuccess && DisplayRepository.clearPendingRollback(this@AdbSessionService)) {
+                ActivityLogRepository.record(this@AdbSessionService, "display rollback", "${latest.previous.activeWidth}x${latest.previous.activeHeight} · ${latest.previous.activeDensity} dpi", true, "konfigurasi sebelumnya dipulihkan otomatis")
+                showNotification("display dipulihkan", "konfigurasi sebelumnya berhasil dikembalikan")
+            } else {
+                val reason = result.exceptionOrNull()?.message ?: "state rollback belum berhasil dihapus dari penyimpanan"
+                ActivityLogRepository.record(this@AdbSessionService, "display rollback", "", false, reason)
+                showNotification("rollback display belum tuntas", "$reason. state pemulihan tetap disimpan; sambungkan ulang atau pulihkan secara manual")
+            }
+        }
+    }
+
+    private fun keepDisplayConfiguration() {
+        val pending = DisplayRepository.pendingRollback(this)
+        if (pending != null && System.currentTimeMillis() >= pending.deadlineEpochMs) {
+            schedulePendingDisplayRollback()
+            showNotification("waktu konfirmasi display habis", "rollback sudah melewati batas waktu. konfigurasi sebelumnya akan dipulihkan, bukan dipertahankan")
+            return
+        }
+        displayRollbackJob?.cancel()
+        displayRollbackJob = null
+        if (!DisplayRepository.clearPendingRollback(this)) {
+            pending?.let { DisplayRepository.savePendingRollback(this, it.previous, it.deadlineEpochMs) }
+            schedulePendingDisplayRollback()
+            showNotification("konfirmasi display belum tersimpan", "penyimpanan keputusan pertahankan gagal. rollback tetap dijadwalkan; jangan putuskan adb")
+            return
+        }
+        if (AdbRuntime.sessionEnabled(this)) {
+            showNotification("perubahan display dipertahankan", "konfigurasi baru tidak akan di-rollback otomatis")
+        } else {
+            stopSelf()
+        }
+    }
+
     private fun disconnect() {
+        val pending = DisplayRepository.pendingRollback(this)
+        if (pending != null) {
+            if (!AdbRuntime.state.value.connected) {
+                // Keep the foreground session eligible for reconnect. Explicitly disabling
+                // it here would strand a persisted display rollback until manual relaunch.
+                AdbRuntime.setSessionEnabled(this, true)
+                step = STEP_RECONNECT
+                showNotification("pemutusan adb ditunda", "rollback display masih tertunda tetapi koneksi sedang terputus. sambungkan ulang agar konfigurasi sebelumnya dipulihkan; sesi tetap aktif")
+                return
+            }
+            displayRollbackJob?.cancel()
+            displayRollbackJob = scope.launch {
+                val restored = DisplayRepository.restore(pending.previous)
+                if (restored.isSuccess && DisplayRepository.clearPendingRollback(this@AdbSessionService)) {
+                    ActivityLogRepository.record(this@AdbSessionService, "display rollback", "${pending.previous.activeWidth}x${pending.previous.activeHeight} · ${pending.previous.activeDensity} dpi", true, "dipulihkan sebelum sesi adb diputus")
+                    displayRollbackJob = null
+                    finishDisconnect()
+                } else {
+                    val reason = restored.exceptionOrNull()?.message ?: "state rollback belum dapat dihapus dari penyimpanan"
+                    showNotification("pemutusan adb ditunda", "masih ada perubahan display yang belum dipastikan pulih: $reason. sesi adb tetap aktif agar pemulihan bisa dicoba lagi")
+                }
+            }
+            return
+        }
+        finishDisconnect()
+    }
+
+    private fun finishDisconnect() {
+        displayRollbackJob?.cancel()
+        displayRollbackJob = null
         AdbRuntime.setSessionEnabled(this, false)
         if (AdbRuntime.state.value.connected) AdbRuntime.disconnect(this)
         step = STEP_NONE
@@ -276,7 +363,9 @@ class AdbSessionService : Service() {
             )
             STEP_RECONNECT -> {
                 builder.addAction(android.R.drawable.ic_popup_sync, "sambungkan ulang", servicePending(ACTION_RECONNECT, 25))
-                builder.addAction(android.R.drawable.ic_menu_close_clear_cancel, "hentikan", servicePending(ACTION_DISCONNECT, 26))
+                if (DisplayRepository.pendingRollback(this) == null) {
+                    builder.addAction(android.R.drawable.ic_menu_close_clear_cancel, "hentikan", servicePending(ACTION_DISCONNECT, 26))
+                }
             }
             STEP_PAIRING, STEP_CONNECTING -> builder.addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
@@ -326,6 +415,8 @@ class AdbSessionService : Service() {
         const val ACTION_RESTORE = "com.devicemanager.adb.RESTORE"
         const val ACTION_DISCONNECT = "com.devicemanager.adb.DISCONNECT"
         const val ACTION_INPUT = "com.devicemanager.adb.INPUT"
+        const val ACTION_SCHEDULE_DISPLAY_ROLLBACK = "com.devicemanager.adb.SCHEDULE_DISPLAY_ROLLBACK"
+        const val ACTION_KEEP_DISPLAY = "com.devicemanager.adb.KEEP_DISPLAY"
         const val KEY_INPUT = "adb_remote_input"
         private const val CHANNEL_ID = NotificationChannels.ADB_SESSION_ID
         private const val NOTIFICATION_ID = 4102
@@ -345,5 +436,8 @@ class AdbSessionService : Service() {
             val intent = Intent(context, AdbSessionService::class.java).setAction(action)
             ContextCompat.startForegroundService(context, intent)
         }
+
+        fun scheduleDisplayRollback(context: Context) = start(context, ACTION_SCHEDULE_DISPLAY_ROLLBACK)
+        fun keepDisplayConfiguration(context: Context) = start(context, ACTION_KEEP_DISPLAY)
     }
 }

@@ -2,6 +2,7 @@ package com.devicemanager
 
 import android.Manifest
 import android.content.Context
+import android.graphics.Typeface
 import android.content.pm.PackageManager
 import android.content.Intent
 import android.net.Uri
@@ -41,6 +42,9 @@ import com.devicemanager.apps.AndroidUserRepository
 import com.devicemanager.data.ActivityLogRepository
 import com.devicemanager.device.DeviceInfo
 import com.devicemanager.display.DisplayRepository
+import com.devicemanager.display.DisplayStatus
+import com.devicemanager.display.DisplayTarget
+import com.devicemanager.display.DisplayScale
 import com.devicemanager.terminal.TerminalCommandRisk
 import com.devicemanager.monitor.DeviceMonitor
 import com.devicemanager.system.SystemRepository
@@ -61,6 +65,7 @@ private val AccentOptions = listOf(
     "rose" to Color(0xFFFF9FB3)
 )
 private val LocalAccent = compositionLocalOf { AccentOptions.first().second }
+private val LocalFaFont = compositionLocalOf { FontFamily.Default }
 private val Good = Color(0xFF45D6A0)
 private val Warn = Color(0xFFFFC46B)
 private val Danger = Color(0xFFFF7777)
@@ -83,6 +88,7 @@ private fun DeviceManagerRoot() {
     var dark by remember { mutableStateOf(prefs.getBoolean("dark", true)) }
     var accentIndex by remember { mutableIntStateOf(prefs.getInt("accent_index", 0).coerceIn(0, AccentOptions.lastIndex)) }
     val accent = AccentOptions[accentIndex].second
+    val faFont = remember(context) { FontFamily(Typeface.createFromAsset(context.assets, "fa-solid-900.ttf")) }
     val colorScheme = if (dark) darkColorScheme(
         primary = accent, onPrimary = Color(0xFF10182B), secondary = Good,
         background = Color(0xFF10141C), surface = Color(0xFF191F29), surfaceVariant = Color(0xFF252D39),
@@ -93,7 +99,7 @@ private fun DeviceManagerRoot() {
         surface = Color.White, surfaceVariant = Color(0xFFE8EDF5), onBackground = Color(0xFF18202C),
         onSurface = Color(0xFF18202C), outline = Color(0xFFD4DCE7), error = Color(0xFFB3261E)
     )
-    CompositionLocalProvider(LocalAccent provides accent) {
+    CompositionLocalProvider(LocalAccent provides accent, LocalFaFont provides faFont) {
         MaterialTheme(colorScheme = colorScheme) {
             MainShell(
                 dark = dark,
@@ -115,6 +121,7 @@ private fun MainShell(dark: Boolean, onDarkChange: (Boolean) -> Unit, accentInde
     var route by remember { mutableStateOf("home") }
     var device by remember { mutableStateOf(DeviceInfo.read(context)) }
     var monitor by remember { mutableStateOf(DeviceMonitor.read(context)) }
+    var safetyMode by remember { mutableStateOf(DisplayRepository.safetyMode(context)) }
     var toast by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
@@ -122,7 +129,7 @@ private fun MainShell(dark: Boolean, onDarkChange: (Boolean) -> Unit, accentInde
         device = DeviceInfo.read(context)
         if (route == "home" || route == "monitor") {
             while (true) {
-                monitor = withContext(Dispatchers.IO) { DeviceMonitor.read(context) }
+                monitor = withContext(Dispatchers.IO) { DeviceMonitor.refresh(context) }
                 delay(2500)
             }
         }
@@ -137,14 +144,17 @@ private fun MainShell(dark: Boolean, onDarkChange: (Boolean) -> Unit, accentInde
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text("device manager", fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FaIcon(0xf10b, color = LocalAccent.current, size = 18)
+                            Text("device manager", fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                        }
                         Text("${device.manufacturer} ${device.model}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Row(
                         Modifier.background(if (adb.connected) Good.copy(alpha = .13f) else MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(50)).padding(horizontal = 10.dp, vertical = 7.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Box(Modifier.size(7.dp).background(if (adb.connected) Good else Warn, CircleShape))
+                        FaIcon(0xf0c1, color = if (adb.connected) Good else Warn, size = 12)
                         Spacer(Modifier.width(7.dp))
                         Text(if (adb.connected) "adb aktif" else "adb offline", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                     }
@@ -154,12 +164,12 @@ private fun MainShell(dark: Boolean, onDarkChange: (Boolean) -> Unit, accentInde
         },
         bottomBar = {
             NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
-                val items = listOf(Triple("home", "beranda", "⌂"), Triple("display", "display", "▣"), Triple("apps", "aplikasi", "▦"), Triple("adb", "adb", "⌁"), Triple("more", "lainnya", "•••"))
+                val items = listOf(Triple("home", "beranda", 0xf015), Triple("display", "display", 0xf108), Triple("apps", "aplikasi", 0xf00a), Triple("adb", "adb", 0xf0c1), Triple("more", "lainnya", 0xf141))
                 items.forEach { (key, label, glyph) ->
                     NavigationBarItem(
                         selected = route == key || (key == "more" && route in setOf("monitor", "system", "terminal", "settings", "activity")),
                         onClick = { route = key },
-                        icon = { Text(glyph, fontSize = 20.sp, fontWeight = FontWeight.Bold) },
+                        icon = { FaIcon(glyph, size = 19) },
                         label = { Text(label, fontSize = 10.sp) },
                         alwaysShowLabel = true
                     )
@@ -171,13 +181,16 @@ private fun MainShell(dark: Boolean, onDarkChange: (Boolean) -> Unit, accentInde
         Box(Modifier.fillMaxSize().padding(padding)) {
             when (route) {
                 "home" -> HomeScreen(device, monitor, adb.connected) { route = it }
-                "display" -> DisplayScreen(device) { msg -> toast = msg }
+                "display" -> DisplayScreen(safetyMode, adb.connected) { msg -> toast = msg }
                 "apps" -> AppsScreen { msg -> toast = msg }
                 "adb" -> AdbScreen { msg -> toast = msg }
                 "monitor" -> MonitorScreen(monitor)
                 "system" -> SystemScreen { msg -> toast = msg }
                 "terminal" -> TerminalScreen { msg -> toast = msg }
-                "settings" -> SettingsScreen(dark, onDarkChange, accentIndex, onAccentChange) { msg -> toast = msg }
+                "settings" -> SettingsScreen(dark, onDarkChange, accentIndex, onAccentChange, safetyMode, { enabled ->
+                    if (DisplayRepository.setSafetyMode(context, enabled)) safetyMode = enabled
+                    else toast = "status safety mode gagal disimpan"
+                }) { msg -> toast = msg }
                 "activity" -> ActivityScreen()
                 else -> MoreScreen { route = it }
             }
@@ -201,7 +214,10 @@ private fun PageColumn(content: @Composable ColumnScope.() -> Unit) {
 @Composable
 private fun PageTitle(title: String, subtitle: String) {
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        Text(title, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            iconForText(title)?.let { FaIcon(it, color = LocalAccent.current, size = 21) }
+            Text(title, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        }
         Text(subtitle, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
@@ -211,7 +227,10 @@ private fun Panel(title: String, trailing: (@Composable () -> Unit)? = null, con
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(20.dp), border = CardDefaults.outlinedCardBorder()) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(title.uppercase(Locale.ROOT), Modifier.weight(1f), fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    iconForText(title)?.let { FaIcon(it, color = MaterialTheme.colorScheme.onSurfaceVariant, size = 13) }
+                    Text(title.uppercase(Locale.ROOT), fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 trailing?.invoke()
             }
             content()
@@ -222,7 +241,10 @@ private fun Panel(title: String, trailing: (@Composable () -> Unit)? = null, con
 @Composable
 private fun InfoRow(label: String, value: String, mono: Boolean = false) {
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
-        Text(label, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            iconForText(label)?.let { FaIcon(it, color = MaterialTheme.colorScheme.onSurfaceVariant, size = 12) }
+            Text(label, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         Text(value, fontSize = 13.sp, fontWeight = FontWeight.Medium, fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default,
             modifier = Modifier.weight(1.2f), textAlign = androidx.compose.ui.text.style.TextAlign.End)
     }
@@ -232,7 +254,10 @@ private fun InfoRow(label: String, value: String, mono: Boolean = false) {
 private fun MetricTile(title: String, value: String, detail: String, fraction: Float? = null, modifier: Modifier = Modifier) {
     Card(modifier, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(18.dp)) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text(title, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                iconForText(title)?.let { FaIcon(it, color = MaterialTheme.colorScheme.onSurfaceVariant, size = 12) }
+                Text(title, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             Text(value, fontSize = 21.sp, fontWeight = FontWeight.Bold)
             Text(detail, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (fraction != null) LinearProgressIndicator(progress = { fraction.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth().height(5.dp), color = LocalAccent.current, trackColor = MaterialTheme.colorScheme.surfaceVariant)
@@ -240,10 +265,73 @@ private fun MetricTile(title: String, value: String, detail: String, fraction: F
     }
 }
 
+private fun iconForText(value: String): Int? {
+    val text = value.lowercase(Locale.ROOT)
+    return when {
+        "beranda" in text || "dashboard" in text || "home" in text || "ringkasan" in text -> 0xf015
+        "perangkat" in text || "device" in text -> 0xf10b
+        "display" in text || "resolusi" in text -> 0xf108
+        "density" in text || "dpi" in text || "skala" in text -> 0xf1de
+        "cpu" in text || "soc" in text || "chip" in text -> 0xf2db
+        "ram" in text || "memori" in text -> 0xf538
+        "storage" in text || "penyimpanan" in text -> 0xf0a0
+        "baterai" in text || "battery" in text -> 0xf240
+        "suhu" in text || "thermal" in text || "temperature" in text -> 0xf2c9
+        "aplikasi" in text || "package" in text || "app manager" in text -> 0xf00a
+        "adb" in text || "pairing" in text || "koneksi" in text || "connect" in text -> 0xf0c1
+        "terminal" in text || "shell" in text || "command" in text -> 0xf120
+        "monitor" in text || "usage" in text -> 0xf201
+        "system" in text || "sistem" in text || "pengaturan" in text || "settings" in text -> 0xf013
+        "activity" in text || "riwayat" in text || "log" in text -> 0xf1da
+        "safety" in text || "aman" in text || "perlindungan" in text -> 0xf3ed
+        "reset" in text || "pulihkan" in text || "pemulihan" in text || "rollback" in text -> 0xf2f1
+        "manual" in text || "konfigurasi" in text -> 0xf0ad
+        "warning" in text || "peringatan" in text || "bahaya" in text -> 0xf071
+        "hapus" in text || "delete" in text || "clear" in text -> 0xf1f8
+        "baca" in text || "refresh" in text || "ambil" in text -> 0xf021
+        "search" in text || "cari" in text -> 0xf002
+        "tema" in text || "warna" in text || "color" in text -> 0xf53f
+        "informasi" in text || "detail" in text || "status" in text -> 0xf05a
+        "user" in text || "profil" in text -> 0xf007
+        "proses" in text || "process" in text -> 0xf013
+        "uptime" in text || "waktu" in text || "time" in text -> 0xf017
+        "tegangan" in text || "voltage" in text -> 0xf0e7
+        "hardware" in text || "arsitektur" in text -> 0xf2db
+        "versi" in text || "version" in text || "release" in text -> 0xf02b
+        "ukuran" in text || "size" in text -> 0xf065
+        "manufacturer" in text || "produsen" in text || "model" in text -> 0xf1b2
+        "animasi" in text || "animation" in text -> 0xf0d0
+        "izin" in text || "permission" in text -> 0xf2bb
+        "pertahankan" in text || "simpan" in text -> 0xf00c
+        "batal" in text || "cancel" in text -> 0xf00d
+        "default" in text -> 0xf0e2
+        "preset" in text -> 0xf0b0
+        "akses cepat" in text -> 0xf0e7
+        "lainnya" in text || "more" in text -> 0xf141
+        "device" in text || "perangkat" in text -> 0xf10b
+        else -> null
+    }
+}
+
+@Composable
+private fun FaIcon(codePoint: Int, modifier: Modifier = Modifier, color: Color = MaterialTheme.colorScheme.onSurface, size: Int = 16) {
+    Text(
+        text = String(Character.toChars(codePoint)),
+        modifier = modifier,
+        color = color,
+        fontFamily = LocalFaFont.current,
+        fontSize = size.sp,
+        lineHeight = (size + 2).sp
+    )
+}
+
 @Composable
 private fun PrimaryButton(text: String, onClick: () -> Unit, enabled: Boolean = true, modifier: Modifier = Modifier) {
     Button(onClick = onClick, enabled = enabled, modifier = modifier, shape = RoundedCornerShape(13.dp), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 11.dp)) {
-        Text(text, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FaIcon(iconForText(text) ?: 0xf00c, size = 14)
+            Text(text, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        }
     }
 }
 
@@ -251,7 +339,10 @@ private fun PrimaryButton(text: String, onClick: () -> Unit, enabled: Boolean = 
 private fun SecondaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, danger: Boolean = false) {
     OutlinedButton(onClick = onClick, modifier = modifier, shape = RoundedCornerShape(13.dp), contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
         colors = ButtonDefaults.outlinedButtonColors(contentColor = if (danger) Danger else MaterialTheme.colorScheme.onSurface)) {
-        Text(text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FaIcon(iconForText(text) ?: 0xf0c7, size = 13)
+            Text(text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        }
     }
 }
 
@@ -275,7 +366,7 @@ private fun HomeScreen(device: DeviceInfo.Snapshot, monitor: DeviceMonitor.Snaps
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             MetricTile("baterai", monitor.batteryPercent?.let { "$it%" } ?: "n/a", when (monitor.charging) { true -> "sedang mengisi"; false -> "tidak mengisi"; null -> "status tidak tersedia" }, modifier = Modifier.weight(1f))
-            MetricTile("cpu", monitor.cpuPercent?.let { "${it.toInt()}%" } ?: "n/a", "${monitor.cpuCores} logical cores", modifier = Modifier.weight(1f))
+            MetricTile("cpu", monitor.cpuPercent?.let { "${it.toInt()}%" } ?: "—", if (monitor.cpuPercent == null) monitor.cpuStatus.take(24) else "${monitor.cpuCores} logical cores", modifier = Modifier.weight(1f))
         }
         Panel("status adb", trailing = { Text(if (adbConnected) "terhubung" else "offline", color = if (adbConnected) Good else Warn, fontSize = 12.sp, fontWeight = FontWeight.Bold) }) {
             Text("adb dibutuhkan untuk operasi display, kontrol aplikasi, pengaturan sistem, dan terminal shell.", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -285,7 +376,7 @@ private fun HomeScreen(device: DeviceInfo.Snapshot, monitor: DeviceMonitor.Snaps
             listOf("display" to "resolusi dan density", "apps" to "paket aplikasi", "monitor" to "monitor sistem", "terminal" to "adb shell terminal").forEach { (key, label) ->
                 Row(Modifier.fillMaxWidth().clickable { navigate(key) }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(label, Modifier.weight(1f), fontSize = 14.sp)
-                    Text("›", color = LocalAccent.current, fontSize = 22.sp)
+                    FaIcon(0xf054, color = LocalAccent.current, size = 13)
                 }
             }
         }
@@ -293,89 +384,304 @@ private fun HomeScreen(device: DeviceInfo.Snapshot, monitor: DeviceMonitor.Snaps
 }
 
 @Composable
-private fun DisplayScreen(device: DeviceInfo.Snapshot, notify: (String) -> Unit) {
+private fun DisplayScreen(safetyMode: Boolean, adbConnected: Boolean, notify: (String) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var width by remember { mutableStateOf(device.resolution.substringBefore('×').trim()) }
-    var height by remember { mutableStateOf(device.resolution.substringAfter('×').trim()) }
-    var dpi by remember { mutableStateOf(device.densityDpi.toString()) }
-    var current by remember { mutableStateOf("belum dibaca via adb") }
+    var status by remember { mutableStateOf<DisplayStatus?>(null) }
+    var baseline by remember { mutableStateOf(DisplayRepository.baseline(context)) }
+    var selectedScale by remember { mutableFloatStateOf(1f) }
+    var widthInput by remember { mutableStateOf("") }
+    var heightInput by remember { mutableStateOf("") }
+    var densityInput by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
-    var pendingDisplay by remember { mutableStateOf<String?>(null) }
+    var queuedTarget by remember { mutableStateOf<DisplayTarget?>(null) }
+    var queuedLabel by remember { mutableStateOf("preset") }
+    var queuedResetSize by remember { mutableStateOf(false) }
+    var queuedResetDensity by remember { mutableStateOf(false) }
+    var pendingDeadline by remember { mutableLongStateOf(DisplayRepository.pendingRollback(context)?.deadlineEpochMs ?: 0L) }
+    var secondsLeft by remember { mutableIntStateOf(0) }
+    var confirmBaselineRedetect by remember { mutableStateOf(false) }
 
-    fun applyDisplay(action: String) {
+    suspend fun reloadStatus() {
+        if (!adbConnected) return
+        busy = true
+        val result = DisplayRepository.readStatus()
+        result.onSuccess { fresh ->
+            status = fresh
+            runCatching { DisplayRepository.captureBaselineIfMissing(context, fresh) }
+                .onSuccess { baseline = it }
+                .onFailure { notify(it.message ?: "baseline gagal disimpan; preset tetap dikunci") }
+            if (widthInput.isBlank()) widthInput = fresh.activeWidth.toString()
+            if (heightInput.isBlank()) heightInput = fresh.activeHeight.toString()
+            if (densityInput.isBlank()) densityInput = fresh.activeDensity.toString()
+        }.onFailure { notify(it.message ?: "gagal membaca status display") }
+        busy = false
+    }
+
+    LaunchedEffect(adbConnected) {
+        if (adbConnected) {
+            reloadStatus()
+            if (DisplayRepository.pendingRollback(context) != null) {
+                AdbSessionService.scheduleDisplayRollback(context)
+            }
+        } else status = null
+    }
+
+    LaunchedEffect(pendingDeadline) {
+        if (pendingDeadline <= 0L) return@LaunchedEffect
+        while (System.currentTimeMillis() < pendingDeadline) {
+            secondsLeft = ((pendingDeadline - System.currentTimeMillis() + 999L) / 1000L).toInt().coerceAtLeast(0)
+            delay(250)
+        }
+        secondsLeft = 0
+        delay(900)
+        val pending = DisplayRepository.pendingRollback(context)
+        if (pending == null) {
+            pendingDeadline = 0L
+            reloadStatus()
+            notify("countdown selesai; status pemulihan diperbarui")
+        } else {
+            notify("waktu rollback habis, tetapi pemulihan belum terverifikasi; periksa koneksi adb")
+        }
+    }
+
+    fun queueTarget(target: DisplayTarget, label: String, resetSize: Boolean = false, resetDensity: Boolean = false) {
+        queuedTarget = target
+        queuedLabel = label
+        queuedResetSize = resetSize
+        queuedResetDensity = resetDensity
+    }
+
+    fun applyQueuedTarget() {
+        val target = queuedTarget ?: return
+        val before = status ?: run { notify("status display belum terbaca"); return }
+        queuedTarget = null
         busy = true
         scope.launch {
-            val result = when (action) {
-                "resolution" -> DisplayRepository.setResolution(width.toInt(), height.toInt())
-                "density" -> DisplayRepository.setDensity(dpi.toInt())
-                else -> DisplayRepository.resetOverrides()
+            // Repository writes rollback state durably and schedules the service-owned timer
+            // before this composable scope can be cancelled by navigation.
+            val deadline = System.currentTimeMillis() + 15_000L
+            pendingDeadline = deadline
+            val result = DisplayRepository.applyConfiguration(
+                context, target.width, target.height, target.density, before, deadline,
+                resetSize = queuedResetSize, resetDensity = queuedResetDensity
+            )
+            if (result.isSuccess) {
+                status = result.getOrNull()
+                widthInput = target.width.toString()
+                heightInput = target.height.toString()
+                densityInput = target.density.toString()
+                ActivityLogRepository.record(context, "display apply", "${target.width}x${target.height} · ${target.density} dpi", true, "$queuedLabel; rollback otomatis dalam 15 detik")
+                notify("konfigurasi diterapkan sementara; pertahankan dalam 15 detik")
+            } else {
+                ActivityLogRepository.record(context, "display apply", "${target.width}x${target.height} · ${target.density} dpi", false, result.exceptionOrNull()?.message ?: "penerapan gagal")
+                notify(result.exceptionOrNull()?.message ?: "penerapan display gagal")
+                val pending = DisplayRepository.pendingRollback(context)
+                pendingDeadline = pending?.deadlineEpochMs ?: 0L
+                if (pending != null && adbConnected) AdbSessionService.scheduleDisplayRollback(context)
+                reloadStatus()
             }
-            val subject = when (action) {
-                "resolution" -> "${width}x${height}"
-                "density" -> "$dpi dpi"
-                else -> "wm size + density"
-            }
-            val label = when (action) {
-                "resolution" -> "display resolution"
-                "density" -> "display density"
-                else -> "display reset"
-            }
-            ActivityLogRepository.record(context, label, subject, result.isSuccess, result.exceptionOrNull()?.message ?: "perintah wm selesai")
-            notify(result.fold({ if (action == "reset") "override display di-reset" else "perubahan display diterapkan" }, { it.message ?: "perintah gagal" }))
-            current = DisplayRepository.readStatus().fold({ it.replace("\n", " · ") }, { it.message ?: "gagal membaca" })
             busy = false
         }
     }
 
+    val selectedTarget = baseline?.let { runCatching { DisplayScale.target(it.width, it.height, it.density, selectedScale) }.getOrNull() }
+
     PageColumn {
-        PageTitle("display manager", "ubah resolusi dan density melalui shell pada perangkat ini")
-        Panel("nilai dari android api") {
-            InfoRow("resolusi aktual", device.resolution)
-            InfoRow("density", "${device.densityDpi} dpi")
-            InfoRow("status wm", current)
-            SecondaryButton("baca status wm", {
-                busy = true
-                scope.launch {
-                    val result = DisplayRepository.readStatus()
-                    current = result.getOrElse { it.message ?: "gagal membaca" }.replace("\n", " · ")
-                    busy = false
-                }
-            }, modifier = Modifier.fillMaxWidth())
-        }
-        Panel("resolusi khusus") {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(width, { width = it.filter(Char::isDigit).take(5) }, Modifier.weight(1f), label = { Text("lebar px") }, singleLine = true)
-                OutlinedTextField(height, { height = it.filter(Char::isDigit).take(5) }, Modifier.weight(1f), label = { Text("tinggi px") }, singleLine = true)
+        PageTitle("display manager", "resolusi dan logical density dikelola sebagai satu konfigurasi")
+        if (!adbConnected) {
+            Panel("koneksi adb diperlukan") {
+                Text("sambungkan wireless debugging untuk membaca baseline, melihat override, dan mengubah konfigurasi display.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            OutlinedTextField(dpi, { dpi = it.filter(Char::isDigit).take(4) }, Modifier.fillMaxWidth(), label = { Text("density dpi") }, singleLine = true)
-            PrimaryButton("terapkan resolusi", enabled = !busy && width.toIntOrNull() in 240..10000 && height.toIntOrNull() in 240..20000, modifier = Modifier.fillMaxWidth(), onClick = { pendingDisplay = "resolution" })
-            PrimaryButton("terapkan density", enabled = !busy && dpi.toIntOrNull() in 80..1000, modifier = Modifier.fillMaxWidth(), onClick = { pendingDisplay = "density" })
         }
-        Panel("preset") {
-            val ratio = device.resolution.substringBefore('×').trim().toFloatOrNull()?.div(device.resolution.substringAfter('×').trim().toFloatOrNull() ?: 1f) ?: .46f
-            listOf(540 to (540 / ratio).toInt(), 600 to (600 / ratio).toInt(), 720 to (720 / ratio).toInt()).distinct().forEach { (w, h) ->
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("${w} × ${h}", Modifier.weight(1f), fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                    SecondaryButton("pilih", { width = w.toString(); height = h.toString() })
+        Panel("status display", trailing = {
+            Text(if (status != null) "terbaca" else "belum tersedia", fontSize = 11.sp, color = if (status != null) Good else Warn, fontWeight = FontWeight.Bold)
+        }) {
+            status?.let { current ->
+                InfoRow("resolusi aktif", "${current.activeWidth} × ${current.activeHeight} px")
+                InfoRow("resolusi fisik", "${current.physicalWidth} × ${current.physicalHeight} px")
+                InfoRow("override resolusi", if (current.hasSizeOverride) "aktif" else "tidak ada")
+                InfoRow("logical density aktif", "${current.activeDensity} dpi")
+                InfoRow("physical density", "${current.physicalDensity} dpi")
+                InfoRow("override density", if (current.hasDensityOverride) "aktif" else "tidak ada")
+            } ?: Text("status belum dibaca dari wm size dan wm density.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            baseline?.let {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .4f))
+                InfoRow("baseline tersimpan", "${it.width} × ${it.height} px")
+                InfoRow("density baseline", "${it.density} dpi")
+            } ?: Text("baseline belum dapat dipastikan. preset dikunci sampai data fisik berhasil dibaca.", fontSize = 12.sp, color = Warn)
+            SecondaryButton("baca ulang status wm", { scope.launch { reloadStatus() } }, modifier = Modifier.fillMaxWidth(), enabled = adbConnected && !busy)
+            SecondaryButton("deteksi ulang baseline", { confirmBaselineRedetect = true }, modifier = Modifier.fillMaxWidth(), enabled = adbConnected && status != null && !busy && pendingDeadline == 0L)
+        }
+        Panel("safety mode", trailing = {
+            Text(if (safetyMode) "aktif" else "nonaktif", color = if (safetyMode) Good else Warn, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        }) {
+            Text(
+                if (safetyMode) "mode aman membatasi perubahan ke preset yang dihitung dari baseline tersimpan. density manual dan resolusi manual dikunci."
+                else "mode manual aktif. lu dapat memasukkan resolusi dan density sendiri, tetapi validasi, konfirmasi, dan rollback tetap berlaku.",
+                fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text("density di sini adalah logical density Android untuk skala dp, bukan DPI fisik panel.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Panel("preset skala") {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                DisplayScale.presets.forEach { scale ->
+                    FilterChip(
+                        selected = selectedScale == scale,
+                        onClick = { selectedScale = scale },
+                        enabled = baseline != null && !busy,
+                        label = { Text("${(scale * 100).toInt()}%") }
+                    )
                 }
             }
-            SecondaryButton("reset ukuran & density ke default", { applyDisplay("reset") }, modifier = Modifier.fillMaxWidth(), danger = true)
+            selectedTarget?.let { target ->
+                InfoRow("resolusi target", "${target.width} × ${target.height} px")
+                InfoRow("density target", "${target.density} dpi")
+                Text("target dihitung dari baseline tersimpan, bukan dari override aktif. lebar dan tinggi memakai faktor skala sama; pembulatan ke piksel terdekat.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                PrimaryButton(
+                    "terapkan preset ${ (selectedScale * 100).toInt() }%",
+                    enabled = adbConnected && !busy && status != null && pendingDeadline == 0L,
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = {
+                        val base = baseline
+                        val current = status
+                        if (base != null && current != null) {
+                            val resetSize = selectedScale == 1f
+                            val resetDensity = selectedScale == 1f && !base.densityWasOverride
+                            queueTarget(target, "preset ${(selectedScale * 100).toInt()}%", resetSize, resetDensity)
+                        }
+                    }
+                )
+            } ?: Text("preset ini belum dapat digunakan: baseline belum valid atau target berada di luar rentang aman perangkat.", fontSize = 12.sp, color = Warn)
         }
-        Text("catatan: perubahan wm membutuhkan koneksi adb aktif. reset menghapus override dan menjadi jalur pemulihan bila resolusi atau density membuat tampilan sulit dipakai.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (!safetyMode) {
+            Panel("konfigurasi manual") {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(widthInput, { widthInput = it.filter(Char::isDigit).take(5) }, Modifier.weight(1f), label = { Text("lebar px") }, singleLine = true)
+                    OutlinedTextField(heightInput, { heightInput = it.filter(Char::isDigit).take(5) }, Modifier.weight(1f), label = { Text("tinggi px") }, singleLine = true)
+                }
+                OutlinedTextField(densityInput, { densityInput = it.filter(Char::isDigit).take(4) }, Modifier.fillMaxWidth(), label = { Text("logical density") }, singleLine = true)
+                PrimaryButton(
+                    "terapkan resolusi + density manual",
+                    enabled = adbConnected && !busy && pendingDeadline == 0L && widthInput.toIntOrNull() in 240..10_000 && heightInput.toIntOrNull() in 240..20_000 && densityInput.toIntOrNull() in 72..1_000,
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = {
+                        val w = widthInput.toIntOrNull() ?: return@PrimaryButton
+                        val h = heightInput.toIntOrNull() ?: return@PrimaryButton
+                        val d = densityInput.toIntOrNull() ?: return@PrimaryButton
+                        queueTarget(DisplayTarget(w, h, d, 1f), "konfigurasi manual")
+                    }
+                )
+            }
+        }
+        Panel("pemulihan") {
+            val base = baseline
+            PrimaryButton(
+                "pulihkan baseline tersimpan",
+                enabled = adbConnected && !busy && status != null && base != null && pendingDeadline == 0L,
+                modifier = Modifier.fillMaxWidth(),
+                onClick = {
+                    val b = baseline
+                    if (b != null) {
+                        queueTarget(
+                            DisplayTarget(b.width, b.height, b.density, 1f), "pulihkan baseline",
+                            resetSize = true,
+                            resetDensity = !b.densityWasOverride
+                        )
+                    }
+                }
+            )
+            SecondaryButton(
+                "reset ke default sistem",
+                enabled = adbConnected && !busy && status != null && pendingDeadline == 0L,
+                modifier = Modifier.fillMaxWidth(), danger = true,
+                onClick = {
+                    status?.let { current ->
+                        queueTarget(DisplayTarget(current.physicalWidth, current.physicalHeight, current.physicalDensity, 1f), "reset default sistem", true, true)
+                    }
+                }
+            )
+            Text("pulihkan baseline mengembalikan resolusi fisik dan logical density yang terdeteksi saat baseline pertama disimpan. reset default sistem menghapus kedua override Android.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (pendingDeadline > 0L) {
+            Panel("konfirmasi perubahan sementara", trailing = {
+                Text(if (secondsLeft > 0) "${secondsLeft}s" else "menunggu rollback", color = if (secondsLeft > 0) Warn else Danger, fontWeight = FontWeight.Bold)
+            }) {
+                Text("konfigurasi baru akan dipertahankan hanya setelah lu memilih tombol pertahankan. jika tidak, service ADB mencoba mengembalikan resolusi dan density sebelumnya.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                PrimaryButton("pertahankan perubahan", enabled = adbConnected && pendingDeadline > 0L && secondsLeft > 0, modifier = Modifier.fillMaxWidth(), onClick = {
+                    AdbSessionService.keepDisplayConfiguration(context)
+                    pendingDeadline = 0L
+                    secondsLeft = 0
+                    notify("permintaan mempertahankan konfigurasi dikirim ke service adb")
+                })
+                SecondaryButton("pulihkan sekarang", enabled = adbConnected && !busy, modifier = Modifier.fillMaxWidth(), danger = true, onClick = {
+                    val pending = DisplayRepository.pendingRollback(context)
+                    if (pending != null) scope.launch {
+                        busy = true
+                        val result = DisplayRepository.restore(pending.previous)
+                        if (result.isSuccess) {
+                            if (DisplayRepository.clearPendingRollback(context)) {
+                                pendingDeadline = 0L
+                                secondsLeft = 0
+                                reloadStatus()
+                                notify("konfigurasi sebelumnya dipulihkan")
+                            } else {
+                                notify("konfigurasi berhasil dipulihkan, tetapi state rollback belum berhasil dihapus dari penyimpanan")
+                            }
+                        } else notify(result.exceptionOrNull()?.message ?: "pemulihan gagal")
+                        busy = false
+                    }
+                })
+            }
+        }
+        Text("rollback 15 detik dijalankan oleh service sesi ADB dan statusnya disimpan. pemulihan tetap tidak bisa dijamin bila perangkat mati, proses/service dihentikan, atau koneksi wireless debugging putus. sambungkan kembali untuk melanjutkan rollback yang tertunda.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 
-    pendingDisplay?.let { action ->
-        val details = when (action) {
-            "resolution" -> "ubah resolusi override menjadi ${width} × ${height} px? tampilan dapat berubah ukuran atau menjadi sulit digunakan. reset override tetap tersedia dari layar ini."
-            else -> "ubah density display menjadi $dpi dpi? ukuran elemen antarmuka akan berubah secara global."
-        }
+    if (confirmBaselineRedetect) AlertDialog(
+        onDismissRequest = { confirmBaselineRedetect = false },
+        title = { Text("deteksi ulang baseline?") },
+        text = { Text("resolusi baseline akan diambil dari Physical size, sedangkan density baseline memakai logical density yang sedang aktif. lakukan saat konfigurasi display berada pada kondisi yang ingin dijadikan acuan; bila density override sedang aktif, nilai itulah yang akan disimpan.") },
+        confirmButton = { TextButton(onClick = {
+            confirmBaselineRedetect = false
+            scope.launch {
+                busy = true
+                val result = DisplayRepository.readStatus()
+                result.onSuccess { fresh ->
+                    runCatching { DisplayRepository.replaceBaseline(context, fresh) }
+                        .onSuccess {
+                            baseline = it
+                            status = fresh
+                            selectedScale = 1f
+                            widthInput = fresh.activeWidth.toString()
+                            heightInput = fresh.activeHeight.toString()
+                            densityInput = fresh.activeDensity.toString()
+                            notify("baseline baru berhasil disimpan")
+                        }
+                        .onFailure { notify(it.message ?: "baseline gagal disimpan") }
+                }.onFailure { notify(it.message ?: "baseline tidak dapat dideteksi") }
+                busy = false
+            }
+        }) { Text("simpan baseline") } },
+        dismissButton = { TextButton(onClick = { confirmBaselineRedetect = false }) { Text("batal") } }
+    )
+
+    queuedTarget?.let { target ->
+        val before = status
         AlertDialog(
-            onDismissRequest = { pendingDisplay = null },
-            title = { Text("konfirmasi perubahan display") },
-            text = { Text(details) },
-            confirmButton = { TextButton(enabled = !busy, onClick = { pendingDisplay = null; applyDisplay(action) }) { Text("terapkan", color = Danger) } },
-            dismissButton = { TextButton(onClick = { pendingDisplay = null }) { Text("batal") } }
+            onDismissRequest = { if (!busy) queuedTarget = null },
+            title = { Text("konfirmasi konfigurasi display") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("${queuedLabel}: perubahan resolusi dan logical density diterapkan bersama.")
+                    before?.let {
+                        Text("sekarang: ${it.activeWidth} × ${it.activeHeight} px · ${it.activeDensity} dpi", fontSize = 12.sp)
+                    }
+                    Text("target: ${target.width} × ${target.height} px · ${target.density} dpi", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text("setelah diterapkan, lu punya 15 detik untuk mempertahankan perubahan. bila tidak, aplikasi mencoba rollback ke konfigurasi sebelumnya.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            },
+            confirmButton = { TextButton(enabled = !busy, onClick = { applyQueuedTarget() }) { Text("terapkan", color = Danger) } },
+            dismissButton = { TextButton(onClick = { queuedTarget = null }) { Text("batal") } }
         )
     }
 }
@@ -486,7 +792,7 @@ private fun AppsScreen(notify: (String) -> Unit) {
                 Card(Modifier.fillMaxWidth().clickable { selected = app }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(15.dp)) {
                     Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.size(42.dp).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(13.dp)), contentAlignment = Alignment.Center) {
-                            Text(app.label.take(1).uppercase(), fontWeight = FontWeight.Bold, color = LocalAccent.current, fontSize = 17.sp)
+                            FaIcon(0xf00a, color = LocalAccent.current, size = 18)
                         }
                         Spacer(Modifier.width(11.dp))
                         Column(Modifier.weight(1f)) {
@@ -499,7 +805,7 @@ private fun AppsScreen(notify: (String) -> Unit) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        Text("›", color = LocalAccent.current, fontSize = 24.sp)
+                        FaIcon(0xf054, color = LocalAccent.current, size = 15)
                     }
                 }
             }
@@ -641,7 +947,7 @@ private fun MonitorScreen(snapshot: DeviceMonitor.Snapshot) {
     PageColumn {
         PageTitle("system monitor", "pembaruan otomatis saat halaman ini terbuka")
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            MetricTile("cpu", snapshot.cpuPercent?.let { "${it.toInt()}%" } ?: "n/a", "${snapshot.cpuCores} core", modifier = Modifier.weight(1f))
+            MetricTile("cpu", snapshot.cpuPercent?.let { "${it.toInt()}%" } ?: "—", if (snapshot.cpuPercent == null) snapshot.cpuStatus else "${snapshot.cpuCores} logical cores", modifier = Modifier.weight(1f))
             MetricTile("ram", "${(snapshot.ramUsed * 100 / snapshot.ramTotal.coerceAtLeast(1))}%", "${DeviceMonitor.formatBytes(snapshot.ramUsed)} terpakai", snapshot.ramUsed.toFloat() / snapshot.ramTotal.coerceAtLeast(1), Modifier.weight(1f))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -649,6 +955,7 @@ private fun MonitorScreen(snapshot: DeviceMonitor.Snapshot) {
             MetricTile("storage", "${(snapshot.storageUsed * 100 / snapshot.storageTotal.coerceAtLeast(1))}%", "${DeviceMonitor.formatBytes(snapshot.storageAvailable)} free", snapshot.storageUsed.toFloat() / snapshot.storageTotal.coerceAtLeast(1), Modifier.weight(1f))
         }
         Panel("detail") {
+            InfoRow("status cpu", snapshot.cpuStatus)
             InfoRow("ram total", DeviceMonitor.formatBytes(snapshot.ramTotal))
             InfoRow("ram tersedia", DeviceMonitor.formatBytes(snapshot.ramAvailable))
             InfoRow("penyimpanan total", DeviceMonitor.formatBytes(snapshot.storageTotal))
@@ -666,7 +973,7 @@ private fun MonitorScreen(snapshot: DeviceMonitor.Snapshot) {
                 }
             }
         }
-        Text("cpu dan suhu hanya ditampilkan ketika kernel mengekspos file thermal sysfs yang dapat dibaca. angka yang tidak tersedia tidak diganti estimasi.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("persentase cpu dihitung dari delta counter /proc/stat; saat akses aplikasi ditolak, monitor mencoba membaca melalui sesi adb shell. sensor suhu bergantung pada thermal sysfs yang diekspos kernel.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -843,8 +1150,9 @@ private fun TerminalScreen(notify: (String) -> Unit) {
 }
 
 @Composable
-private fun SettingsScreen(dark: Boolean, onDarkChange: (Boolean) -> Unit, accentIndex: Int, onAccentChange: (Int) -> Unit, notify: (String) -> Unit) {
+private fun SettingsScreen(dark: Boolean, onDarkChange: (Boolean) -> Unit, accentIndex: Int, onAccentChange: (Int) -> Unit, safetyMode: Boolean, onSafetyModeChange: (Boolean) -> Unit, notify: (String) -> Unit) {
     val context = LocalContext.current
+    var confirmDisableSafety by remember { mutableStateOf(false) }
     val power = context.getSystemService(PowerManager::class.java)
     var ignoring by remember { mutableStateOf(Build.VERSION.SDK_INT < 23 || power.isIgnoringBatteryOptimizations(context.packageName)) }
     LaunchedEffect(Unit) {
@@ -864,6 +1172,16 @@ private fun SettingsScreen(dark: Boolean, onDarkChange: (Boolean) -> Unit, accen
                 }
                 Switch(dark, onDarkChange)
             }
+        }
+        Panel("perlindungan display") {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("safety mode", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    Text("batasi resolusi ke preset baseline dan kunci density manual", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = safetyMode, onCheckedChange = { enabled -> if (enabled) onSafetyModeChange(true) else confirmDisableSafety = true })
+            }
+            Text("safety mode aktif secara default. mode manual tetap memakai validasi, konfirmasi, dan countdown rollback.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Panel("warna aksen") {
             Text("pilih warna untuk tombol, indikator, dan elemen aktif", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -902,11 +1220,18 @@ private fun SettingsScreen(dark: Boolean, onDarkChange: (Boolean) -> Unit, accen
         }
         Panel("informasi") {
             InfoRow("aplikasi", "device manager")
-            InfoRow("versi", "1.0.0")
+            InfoRow("versi", "1.1.0")
             InfoRow("minimum android", "8.0 · api 26")
             InfoRow("adb engine", "adb-kt · pure kotlin")
         }
     }
+    if (confirmDisableSafety) AlertDialog(
+        onDismissRequest = { confirmDisableSafety = false },
+        title = { Text("nonaktifkan safety mode?") },
+        text = { Text("mode manual mengizinkan resolusi dan logical density diubah bebas dalam rentang valid. nilai yang keliru dapat membuat antarmuka terlalu kecil, terlalu besar, atau sulit dioperasikan. setiap perubahan tetap memerlukan konfirmasi dan rollback 15 detik, tetapi pemulihan tidak dijamin bila perangkat atau sesi ADB terputus.") },
+        confirmButton = { TextButton(onClick = { onSafetyModeChange(false); confirmDisableSafety = false }) { Text("nonaktifkan", color = Danger) } },
+        dismissButton = { TextButton(onClick = { confirmDisableSafety = false }) { Text("tetap aktif") } }
+    )
 }
 
 @Composable
@@ -951,7 +1276,7 @@ private fun MoreScreen(navigate: (String) -> Unit) {
                         Text(content.first, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                         Text(content.second, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    Text("›", color = LocalAccent.current, fontSize = 24.sp)
+                    FaIcon(0xf054, color = LocalAccent.current, size = 15)
                 }
             }
         }

@@ -1,20 +1,216 @@
 package com.devicemanager.display
 
+import android.content.Context
 import com.devicemanager.adb.AdbRuntime
+import com.devicemanager.adb.AdbSessionService
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 object DisplayRepository {
-    suspend fun readStatus(): Result<String> = AdbRuntime.shell("wm size; wm density")
+    private const val PREFS = "display_settings"
+    private const val KEY_BASELINE_WIDTH = "baseline_width"
+    private const val KEY_BASELINE_HEIGHT = "baseline_height"
+    private const val KEY_BASELINE_DENSITY = "baseline_density"
+    private const val KEY_BASELINE_DENSITY_OVERRIDE = "baseline_density_override"
+    private const val KEY_PENDING_ROLLBACK = "pending_rollback"
+    private const val KEY_PENDING_DEADLINE = "pending_rollback_deadline"
 
-    suspend fun setResolution(width: Int, height: Int): Result<String> = runCatching {
-        require(width in 240..10_000) { "lebar harus 240–10000 px" }
-        require(height in 240..20_000) { "tinggi harus 240–20000 px" }
-        AdbRuntime.shell("wm size ${width}x${height}").getOrThrow()
+    data class Baseline(
+        val width: Int,
+        val height: Int,
+        val density: Int,
+        /** true when density already had a user override at first capture. */
+        val densityWasOverride: Boolean
+    )
+
+    data class PendingRollback(val previous: DisplayStatus, val deadlineEpochMs: Long)
+
+    fun preferences(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    fun safetyMode(context: Context): Boolean = preferences(context).getBoolean("safety_mode", true)
+
+    fun setSafetyMode(context: Context, enabled: Boolean): Boolean =
+        preferences(context).edit().putBoolean("safety_mode", enabled).commit()
+
+    fun baseline(context: Context): Baseline? {
+        val prefs = preferences(context)
+        val width = prefs.getInt(KEY_BASELINE_WIDTH, -1)
+        val height = prefs.getInt(KEY_BASELINE_HEIGHT, -1)
+        val density = prefs.getInt(KEY_BASELINE_DENSITY, -1)
+        if (width !in 240..10_000 || height !in 240..20_000 || density !in 72..1_000) return null
+        return Baseline(width, height, density, prefs.getBoolean(KEY_BASELINE_DENSITY_OVERRIDE, false))
     }
 
-    suspend fun setDensity(dpi: Int): Result<String> = runCatching {
-        require(dpi in 80..1000) { "density harus 80–1000 dpi" }
-        AdbRuntime.shell("wm density $dpi").getOrThrow()
+    /** First capture uses native physical size, but the currently effective density as requested. */
+    fun captureBaselineIfMissing(context: Context, status: DisplayStatus): Baseline {
+        baseline(context)?.let { return it }
+        val captured = Baseline(
+            width = status.physicalWidth,
+            height = status.physicalHeight,
+            density = status.activeDensity,
+            densityWasOverride = status.hasDensityOverride
+        )
+        val saved = preferences(context).edit()
+            .putInt(KEY_BASELINE_WIDTH, captured.width)
+            .putInt(KEY_BASELINE_HEIGHT, captured.height)
+            .putInt(KEY_BASELINE_DENSITY, captured.density)
+            .putBoolean(KEY_BASELINE_DENSITY_OVERRIDE, captured.densityWasOverride)
+            .commit()
+        check(saved) { "baseline gagal disimpan ke penyimpanan lokal" }
+        return captured
     }
 
-    suspend fun resetOverrides(): Result<String> = AdbRuntime.shell("wm size reset; wm density reset")
+    /** Explicit re-detection always records physical resolution and current effective logical density. */
+    fun replaceBaseline(context: Context, status: DisplayStatus): Baseline {
+        val captured = Baseline(status.physicalWidth, status.physicalHeight, status.activeDensity, status.hasDensityOverride)
+        val saved = preferences(context).edit()
+            .putInt(KEY_BASELINE_WIDTH, captured.width)
+            .putInt(KEY_BASELINE_HEIGHT, captured.height)
+            .putInt(KEY_BASELINE_DENSITY, captured.density)
+            .putBoolean(KEY_BASELINE_DENSITY_OVERRIDE, captured.densityWasOverride)
+            .commit()
+        check(saved) { "baseline baru gagal disimpan ke penyimpanan lokal" }
+        return captured
+    }
+
+    suspend fun readStatus(): Result<DisplayStatus> = runCatching {
+        val output = AdbRuntime.shell("wm size; wm density").getOrThrow()
+        DisplayStatusParser.parse(output)
+    }
+
+    suspend fun applyConfiguration(
+        context: Context,
+        width: Int,
+        height: Int,
+        density: Int,
+        previous: DisplayStatus,
+        rollbackDeadlineEpochMs: Long,
+        resetSize: Boolean = false,
+        resetDensity: Boolean = false
+    ): Result<DisplayStatus> = withContext(NonCancellable) {
+        if (width !in 240..10_000) return@withContext Result.failure(IllegalArgumentException("lebar harus 240–10000 px"))
+        if (height !in 240..20_000) return@withContext Result.failure(IllegalArgumentException("tinggi harus 240–20000 px"))
+        if (density !in 72..1_000) return@withContext Result.failure(IllegalArgumentException("density harus 72–1000"))
+        if (!savePendingRollback(context, previous, rollbackDeadlineEpochMs)) {
+            return@withContext Result.failure(IllegalStateException("state rollback gagal disimpan; perubahan display tidak dijalankan"))
+        }
+        val sizeCommand = if (resetSize) "wm size reset" else "wm size ${width}x${height}"
+        val densityCommand = if (resetDensity) "wm density reset" else "wm density $density"
+        try {
+            // Execute both halves independently. Even when one fails, the other is still
+            // attempted; the catch path then restores the complete previous configuration.
+            val sizeResult = AdbRuntime.shell(sizeCommand)
+            val densityResult = AdbRuntime.shell(densityCommand)
+            sizeResult.getOrThrow()
+            densityResult.getOrThrow()
+            val after = DisplayStatusParser.parse(AdbRuntime.shell("wm size; wm density").getOrThrow())
+            check(after.activeWidth == width && after.activeHeight == height && after.activeDensity == density) {
+                "android tidak menerapkan seluruh target display"
+            }
+            // The rollback record is durable before the first wm command. Schedule its
+            // owner before returning so leaving this screen cannot cancel the safety job.
+            AdbSessionService.scheduleDisplayRollback(context)
+            Result.success(after)
+        } catch (failure: Throwable) {
+            val rollback = restore(previous)
+            val message = if (rollback.isSuccess) {
+                val cleared = clearPendingRollback(context)
+                if (cleared) {
+                    "penerapan gagal; konfigurasi sebelumnya sudah dipulihkan: ${failure.message ?: "perintah wm gagal"}"
+                } else {
+                    "penerapan gagal dan konfigurasi sebelumnya sudah dipulihkan, tetapi penanda rollback gagal dihapus. periksa status display sebelum perubahan berikutnya."
+                }
+            } else {
+                val saved = savePendingRollback(context, previous, System.currentTimeMillis())
+                if (saved) {
+                    runCatching { AdbSessionService.scheduleDisplayRollback(context) }
+                    "penerapan gagal dan pemulihan otomatis juga gagal. state rollback disimpan untuk dicoba lagi setelah adb tersambung: ${rollback.exceptionOrNull()?.message ?: "koneksi adb terputus"}"
+                } else {
+                    "penerapan gagal dan rollback juga gagal. state pemulihan tidak dapat disimpan; koneksi adb harus dipulihkan dan konfigurasi display dikembalikan secara manual."
+                }
+            }
+            Result.failure(IllegalStateException(message, failure))
+        }
+    }
+
+    /** Restores the exact pre-change override state, not merely the same numeric values. */
+    suspend fun restore(previous: DisplayStatus): Result<Unit> = runCatching {
+        val sizeCommand = if (previous.hasSizeOverride) {
+            "wm size ${previous.activeWidth}x${previous.activeHeight}"
+        } else "wm size reset"
+        val densityCommand = if (previous.hasDensityOverride) {
+            "wm density ${previous.activeDensity}"
+        } else "wm density reset"
+        val sizeResult = AdbRuntime.shell(sizeCommand)
+        val densityResult = AdbRuntime.shell(densityCommand)
+        sizeResult.getOrThrow()
+        densityResult.getOrThrow()
+        val restored = DisplayStatusParser.parse(AdbRuntime.shell("wm size; wm density").getOrThrow())
+        check(restored.activeWidth == previous.activeWidth && restored.activeHeight == previous.activeHeight && restored.activeDensity == previous.activeDensity) {
+            "verifikasi pemulihan display gagal"
+        }
+    }
+
+    suspend fun resetToSystemDefault(): Result<Unit> = runCatching {
+        val size = AdbRuntime.shell("wm size reset")
+        val density = AdbRuntime.shell("wm density reset")
+        size.getOrThrow()
+        density.getOrThrow()
+    }
+
+    fun savePendingRollback(context: Context, previous: DisplayStatus, deadlineEpochMs: Long): Boolean {
+        val json = JSONObject().apply {
+            put("physicalWidth", previous.physicalWidth)
+            put("physicalHeight", previous.physicalHeight)
+            if (previous.hasSizeOverride) {
+                put("overrideWidth", previous.activeWidth)
+                put("overrideHeight", previous.activeHeight)
+            }
+            put("physicalDensity", previous.physicalDensity)
+            if (previous.hasDensityOverride) put("overrideDensity", previous.activeDensity)
+        }
+        return preferences(context).edit()
+            .putString(KEY_PENDING_ROLLBACK, json.toString())
+            .putLong(KEY_PENDING_DEADLINE, deadlineEpochMs)
+            .commit()
+    }
+
+    fun pendingRollback(context: Context): PendingRollback? = runCatching {
+        val prefs = preferences(context)
+        val raw = prefs.getString(KEY_PENDING_ROLLBACK, null) ?: return null
+        val json = JSONObject(raw)
+        val physicalWidth = json.getInt("physicalWidth")
+        val physicalHeight = json.getInt("physicalHeight")
+        val overrideWidth = if (json.has("overrideWidth")) json.getInt("overrideWidth") else null
+        val overrideHeight = if (json.has("overrideHeight")) json.getInt("overrideHeight") else null
+        val physicalDensity = json.getInt("physicalDensity")
+        val overrideDensity = if (json.has("overrideDensity")) json.getInt("overrideDensity") else null
+        require(physicalWidth in 240..10_000 && physicalHeight in 240..20_000)
+        require(physicalDensity in 72..1_000)
+        require((overrideWidth == null) == (overrideHeight == null))
+        require(overrideWidth == null || (overrideWidth in 240..10_000 && overrideHeight!! in 240..20_000))
+        require(overrideDensity == null || overrideDensity in 72..1_000)
+        val deadline = prefs.getLong(KEY_PENDING_DEADLINE, 0L)
+        require(deadline > 0L)
+        val status = DisplayStatus(
+            physicalWidth, physicalHeight, overrideWidth, overrideHeight,
+            physicalDensity, overrideDensity, "saved rollback state"
+        )
+        PendingRollback(status, deadline)
+    }.getOrNull()
+
+    fun clearPendingRollback(context: Context): Boolean = preferences(context).edit()
+        .remove(KEY_PENDING_ROLLBACK)
+        .remove(KEY_PENDING_DEADLINE)
+        .commit()
+
+    suspend fun restorePendingRollback(context: Context): Result<Boolean> {
+        val pending = pendingRollback(context) ?: return Result.success(false)
+        if (System.currentTimeMillis() < pending.deadlineEpochMs) return Result.success(false)
+        val restored = restore(pending.previous)
+        if (restored.isFailure) return Result.failure(restored.exceptionOrNull()!!)
+        return if (clearPendingRollback(context)) Result.success(true)
+        else Result.failure(IllegalStateException("konfigurasi pulih, tetapi state rollback belum berhasil dihapus dari penyimpanan"))
+    }
 }
