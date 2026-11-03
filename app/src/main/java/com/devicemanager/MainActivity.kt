@@ -65,7 +65,7 @@ private val AccentOptions = listOf(
     "rose" to Color(0xFFFF9FB3)
 )
 private val LocalAccent = compositionLocalOf { AccentOptions.first().second }
-private val LocalFaFont = compositionLocalOf { FontFamily.Default }
+private val LocalFaFont = compositionLocalOf<FontFamily> { FontFamily.Default }
 private val Good = Color(0xFF45D6A0)
 private val Warn = Color(0xFFFFC46B)
 private val Danger = Color(0xFFFF7777)
@@ -336,8 +336,8 @@ private fun PrimaryButton(text: String, onClick: () -> Unit, enabled: Boolean = 
 }
 
 @Composable
-private fun SecondaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, danger: Boolean = false) {
-    OutlinedButton(onClick = onClick, modifier = modifier, shape = RoundedCornerShape(13.dp), contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+private fun SecondaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, danger: Boolean = false, enabled: Boolean = true) {
+    OutlinedButton(onClick = onClick, enabled = enabled, modifier = modifier, shape = RoundedCornerShape(13.dp), contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
         colors = ButtonDefaults.outlinedButtonColors(contentColor = if (danger) Danger else MaterialTheme.colorScheme.onSurface)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FaIcon(iconForText(text) ?: 0xf0c7, size = 13)
