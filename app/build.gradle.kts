@@ -25,7 +25,7 @@ android {
     }
     // jvmTarget diatur lewat kotlin { compilerOptions } di bawah
     packaging {
-        resources.excludes += setOf("META-INF/AL2.0", "META-INF/LGPL2.1", "META-INF/DEPENDENCIES")
+        resources.excludes += setOf("META-INF/AL2.0", "META-INF/LGPL2.1", "META-INF/DEPENDENCIES", "META-INF/LICENSE.md", "META-INF/NOTICE.md", "META-INF/LICENSE-notice.md")
     }
 }
 
