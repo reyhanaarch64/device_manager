@@ -10,7 +10,7 @@ android {
 
     defaultConfig {
         applicationId = "com.devicemanager"
-        minSdk = 31
+        minSdk = 30
         targetSdk = 35
         versionCode = 2
         versionName = "1.1.0"
