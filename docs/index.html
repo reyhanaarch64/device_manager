@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Device Manager — download</title>
+<meta name="description" content="Device Manager: aplikasi Android open source untuk memantau dan mengelola perangkat sendiri lewat ADB wireless debugging. Membutuhkan Android 11 atau lebih baru.">
+<style>
+  :root { color-scheme: dark; --bg:#0b0f16; --panel:#111722; --card:#182131; --line:#1f2a3a; --text:#e7ebf2; --muted:#a1adbc; --accent:#2fd39a; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  a { color:var(--accent); }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 24px 20px 56px; }
+  header { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:8px 0 24px; }
+  header strong { font-size:18px; }
+  header nav a { margin-left:16px; text-decoration:none; color:var(--muted); font-size:14px; }
+  .hero { display:grid; gap:24px; grid-template-columns: 1.1fr 0.9fr; align-items:center; padding:24px 0 40px; }
+  h1 { font-size: 40px; line-height:1.15; margin:0 0 12px; }
+  .lead { color:var(--muted); margin:0 0 24px; }
+  .dl { display:inline-flex; flex-direction:column; gap:4px; padding:16px 22px; border-radius:16px; background:var(--accent); color:#06130e; text-decoration:none; font-weight:700; min-width: 260px; }
+  .dl small { font-weight:500; opacity:.85; }
+  .meta { margin-top:14px; color:var(--muted); font-size:14px; }
+  .phone { justify-self:center; width:260px; }
+  .phone img { width:100%; height:auto; display:block; }
+  section { padding:28px 0; border-top:1px solid var(--line); }
+  h2 { font-size:24px; margin:0 0 16px; }
+  .specs { display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:12px; }
+  .spec { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:16px; }
+  .spec b { display:block; font-size:13px; color:var(--muted); font-weight:600; margin-bottom:4px; text-transform:uppercase; letter-spacing:.04em; }
+  .spec span { font-size:17px; font-weight:600; }
+  .shots { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:20px; }
+  .shots figure { margin:0; text-align:center; }
+  .shots img { width:100%; max-width:280px; height:auto; }
+  .shots figcaption { color:var(--muted); font-size:14px; margin-top:8px; }
+  ol li { margin-bottom:8px; }
+  code { background:var(--card); padding:2px 6px; border-radius:6px; font-size:14px; }
+  .note { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px 16px; color:var(--muted); font-size:14px; }
+  footer { border-top:1px solid var(--line); padding-top:20px; color:var(--muted); font-size:14px; }
+  @media (max-width: 720px) { .hero { grid-template-columns: 1fr; } .phone { order:-1; } h1 { font-size:32px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <strong>Device Manager</strong>
+    <nav>
+      <a href="#spesifikasi">spesifikasi</a>
+      <a href="#screenshot">tampilan</a>
+      <a href="#pasang">cara pasang</a>
+      <a href="https://github.com/reyhanaarch64/device_manager">github</a>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <div>
+      <h1>pantau dan kelola perangkat sendiri lewat ADB</h1>
+      <p class="lead">aplikasi Android open source buat melihat status perangkat, mengatur resolusi dan density lewat <code>wm</code>, mengelola aplikasi, serta menjalankan shell ADB — semua lewat wireless debugging, tanpa root.</p>
+      <a id="download" class="dl" href="https://github.com/reyhanaarch64/device_manager/releases/latest">
+        <span>download apk</span>
+        <small id="dl-size">memuat ukuran file…</small>
+      </a>
+      <p class="meta" id="dl-meta">versi terbaru · membutuhkan Android 11+</p>
+    </div>
+    <div class="phone">
+      <img src="screenshots/dashboard.svg" alt="tampilan dashboard Device Manager">
+    </div>
+  </div>
+
+  <section id="spesifikasi">
+    <h2>spesifikasi</h2>
+    <div class="specs">
+      <div class="spec"><b>android minimum</b><span>Android 11 (API 30)</span></div>
+      <div class="spec"><b>target</b><span>Android 15 (API 35)</span></div>
+      <div class="spec"><b>koneksi</b><span>wireless debugging (ADB)</span></div>
+      <div class="spec"><b>root</b><span>tidak dibutuhkan</span></div>
+      <div class="spec"><b>bahasa</b><span>Kotlin · Jetpack Compose</span></div>
+      <div class="spec"><b>lisensi</b><span>MIT</span></div>
+    </div>
+    <p class="note" style="margin-top:16px">wireless debugging (pairing dari menu developer options) baru tersedia mulai Android 11. di bawah versi itu, aplikasi tidak bisa membentuk sesi ADB.</p>
+  </section>
+
+  <section id="screenshot">
+    <h2>tampilan</h2>
+    <div class="shots">
+      <figure><img src="screenshots/dashboard.svg" alt="dashboard"><figcaption>dashboard perangkat</figcaption></figure>
+      <figure><img src="screenshots/display.svg" alt="display manager"><figcaption>display manager dengan safety mode dan rollback</figcaption></figure>
+      <figure><img src="screenshots/adb.svg" alt="adb manager"><figcaption>adb manager dan shell</figcaption></figure>
+    </div>
+    <p class="note" style="margin-top:16px">tampilan di atas adalah mockup SVG untuk gambaran UI, bukan tangkapan layar langsung dari perangkat.</p>
+  </section>
+
+  <section id="pasang">
+    <h2>cara pasang</h2>
+    <ol>
+      <li>download apk dari tombol di atas, lalu buka filenya.</li>
+      <li>izinkan instalasi dari sumber tidak dikenal kalau diminta sistem.</li>
+      <li>buka developer options, aktifkan <b>wireless debugging</b>.</li>
+      <li>di aplikasi, tekan <b>mulai pairing</b>, lalu ikuti langkah pairing (alamat dan kode dimasukkan lewat notifikasi).</li>
+      <li>setelah terhubung, perintah shell dan pengaturan display bisa dipakai.</li>
+    </ol>
+    <p class="note">apk ini build debug yang ditandatangani dengan kunci debug. sistem mungkin menampilkan peringatan saat instalasi.</p>
+  </section>
+
+  <footer>
+    <p>source code, issue, dan lisensi ada di <a href="https://github.com/reyhanaarch64/device_manager">github.com/reyhanaarch64/device_manager</a>.<br>
+    font ikon: Font Awesome Free (lihat <a href="https://github.com/reyhanaarch64/device_manager/blob/main/FONT-AWESOME-NOTICE.txt">FONT-AWESOME-NOTICE.txt</a>).</p>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var API = "https://api.github.com/repos/reyhanaarch64/device_manager/releases/latest";
+  var size = document.getElementById("dl-size");
+  var meta = document.getElementById("dl-meta");
+  var btn = document.getElementById("download");
+
+  function fmt(bytes) {
+    if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + " MB";
+    if (bytes >= 1024) return (bytes / 1024).toFixed(0) + " KB";
+    return bytes + " B";
+  }
+
+  fetch(API, { headers: { Accept: "application/vnd.github+json" } })
+    .then(function (r) { if (!r.ok) throw new Error("status " + r.status); return r.json(); })
+    .then(function (rel) {
+      var apk = (rel.assets || []).filter(function (a) { return /\.apk$/i.test(a.name); })[0];
+      if (!apk) throw new Error("no apk");
+      btn.href = apk.browser_download_url;
+      btn.setAttribute("download", apk.name);
+      size.textContent = apk.name + " · " + fmt(apk.size);
+      meta.textContent = "versi " + rel.tag_name + " · membutuhkan Android 11+";
+    })
+    .catch(function () {
+      size.textContent = "lihat semua rilis di github";
+    });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 720" role="img" aria-label="mockup display manager">
+  <rect width="360" height="720" rx="36" fill="#0b0f16"/>
+  <rect x="8" y="8" width="344" height="704" rx="30" fill="#111722" stroke="#1f2a3a"/>
+  <text x="28" y="54" fill="#e7ebf2" font-family="sans-serif" font-size="18" font-weight="700">display manager</text>
+  <rect x="24" y="80" width="312" height="100" rx="18" fill="#182131"/>
+  <text x="40" y="108" fill="#a1adbc" font-family="sans-serif" font-size="12">baseline tersimpan</text>
+  <text x="40" y="136" fill="#e7ebf2" font-family="sans-serif" font-size="16" font-weight="700">1080 × 2400 px</text>
+  <text x="40" y="160" fill="#e7ebf2" font-family="sans-serif" font-size="14">density baseline 420 dpi</text>
+  <rect x="24" y="194" width="312" height="44" rx="14" fill="#1d3a2f"/>
+  <text x="40" y="221" fill="#2fd39a" font-family="sans-serif" font-size="13" font-weight="700">safety mode aktif</text>
+  <text x="40" y="266" fill="#a1adbc" font-family="sans-serif" font-size="12">preset skala</text>
+  <rect x="24" y="278" width="100" height="58" rx="14" fill="#182131" stroke="#2fd39a"/>
+  <text x="74" y="302" text-anchor="middle" fill="#e7ebf2" font-family="sans-serif" font-size="13" font-weight="700">100%</text>
+  <text x="74" y="322" text-anchor="middle" fill="#a1adbc" font-family="sans-serif" font-size="11">1080×2400</text>
+  <rect x="130" y="278" width="100" height="58" rx="14" fill="#182131"/>
+  <text x="180" y="302" text-anchor="middle" fill="#e7ebf2" font-family="sans-serif" font-size="13" font-weight="700">80%</text>
+  <text x="180" y="322" text-anchor="middle" fill="#a1adbc" font-family="sans-serif" font-size="11">864×1920</text>
+  <rect x="236" y="278" width="100" height="58" rx="14" fill="#182131"/>
+  <text x="286" y="302" text-anchor="middle" fill="#e7ebf2" font-family="sans-serif" font-size="13" font-weight="700">67%</text>
+  <text x="286" y="322" text-anchor="middle" fill="#a1adbc" font-family="sans-serif" font-size="11">720×1600</text>
+  <rect x="24" y="352" width="312" height="110" rx="18" fill="#2a2414" stroke="#e8b04a"/>
+  <text x="40" y="380" fill="#e8b04a" font-family="sans-serif" font-size="13" font-weight="700">konfirmasi perubahan</text>
+  <text x="40" y="404" fill="#e7ebf2" font-family="sans-serif" font-size="12">rollback otomatis dalam 15 detik</text>
+  <text x="318" y="440" text-anchor="end" fill="#e8b04a" font-family="sans-serif" font-size="22" font-weight="700">12s</text>
+  <rect x="24" y="476" width="150" height="40" rx="12" fill="#2fd39a"/>
+  <text x="99" y="501" text-anchor="middle" fill="#06130e" font-family="sans-serif" font-size="12" font-weight="700">pertahankan</text>
+  <rect x="186" y="476" width="150" height="40" rx="12" fill="#182131"/>
+  <text x="261" y="501" text-anchor="middle" fill="#e7ebf2" font-family="sans-serif" font-size="12" font-weight="700">pulihkan sekarang</text>
+  <rect x="24" y="530" width="312" height="40" rx="12" fill="#182131"/>
+  <text x="180" y="555" text-anchor="middle" fill="#e7ebf2" font-family="sans-serif" font-size="12" font-weight="700">reset ke default sistem</text>
+</svg>
