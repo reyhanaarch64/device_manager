@@ -1,20 +1,18 @@
 # Device Manager Android
 
-[![android build](https://github.com/reyhanaarch64/device_manager/actions/workflows/android-build.yml/badge.svg)](https://github.com/reyhanaarch64/device_manager/actions/workflows/android-build.yml) [![license: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-
 aplikasi android native berbasis kotlin dan jetpack compose untuk memantau serta mengelola perangkat yang sedang menjalankan aplikasi. seluruh identitas perangkat dibaca saat runtime; tidak ada nama model, chipset, user id, resolusi, atau daftar aplikasi yang di-hardcode.
 
 ## fitur yang diimplementasikan
 
 - **dashboard** — manufacturer, model, device, product, build hardware, android release/api, soc model saat api mengeksposnya, abi, resolusi, density, ram, storage, baterai, cpu usage, logical cores, uptime.
-- **display manager** — baca physical size/density dan override aktif dari `wm size`/`wm density`; baseline persisten; safety mode default aktif; preset skala yang menghitung resolusi dan logical density dari baseline dengan faktor sama; mode manual hanya ketika safety mode dimatikan; penerapan terkoordinasi, verifikasi, konfirmasi, countdown rollback 15 detik, pemulihan baseline, dan reset default sistem.
+- **display manager** — baca physical size/density dan override aktif dari `wm size`/`wm density`; baseline persisten; safety mode default aktif; preset skala yang menghitung resolusi dan logical density dari baseline dengan faktor sama; estimasi smallest width; mode manual hanya ketika safety mode dimatikan; penerapan terkoordinasi, verifikasi, konfirmasi, rollback 15 detik khusus konfigurasi manual, pemulihan baseline, dan reset default sistem.
 - **app manager** — daftar aplikasi yang dapat dilihat PackageManager, nama, package, versi, uid, status system/user, ukuran file apk/split apk; force-stop, enable, disable, uninstall untuk user yang dipilih, dan `install-existing`.
 - **multi-user** — membaca output `pm list users`, mengambil user id aktif dari uid proses, memilih profil berdasarkan id yang benar-benar ditemukan, dan menjalankan `pm list packages --user <id>`. metadata profil lain tidak direkayasa: nama/version/uid/ukuran akan ditandai tidak tersedia bila PackageManager proses tidak dapat membacanya.
 - **adb manager** — pairing wireless debugging dengan TLS/SPAKE2 dan pairing code 6 digit, koneksi TLS dengan port terpisah, reconnect endpoint terakhir, disconnect, hapus endpoint tersimpan, reset kredensial lokal, riwayat koneksi.
 - **interactive notification** — foreground service dengan ongoing notification dan RemoteInput untuk input endpoint pairing, kode pairing, lalu endpoint koneksi. alamat pairing dan alamat koneksi diminta terpisah.
 - **system monitor** — penggunaan RAM, storage, CPU dari delta counter `/proc/stat` (dengan fallback pembacaan melalui ADB shell saat akses UID aplikasi ditolak), jumlah logical core, status/error pembacaan CPU, tegangan, dan suhu baterai, uptime, serta sensor thermal yang dapat dibaca.
 - **system manager** — baca dan ubah tiga animation scale, baca properti sistem, daftar proses, dan global settings.
-- **adb shell terminal** — PTY interaktif melalui Shell v2, streaming stdout/stderr, input perintah, dan dialog konfirmasi heuristik untuk kelompok perintah berisiko.
+- **adb shell terminal** — PTY interaktif melalui Shell v2 dengan fallback ke legacy `shell:` bila inisialisasi Shell v2 gagal, streaming output, input perintah, dan dialog konfirmasi heuristik untuk kelompok perintah berisiko.
 - **settings dan activity log** — tema gelap/terang, izin notifikasi, pengaturan optimasi baterai, catatan lokal maksimal 200 event. isi perintah terminal dan kode pairing tidak disimpan dalam log.
 
 ## display manager dan safety mode
@@ -23,9 +21,17 @@ safety mode aktif secara default dan statusnya disimpan lokal. baseline resolusi
 
 preset yang tersedia adalah 100%, 90%, 80%, 75%, 67%, dan 50%. lebar, tinggi, dan logical density dihitung dari baseline dengan faktor yang sama, lalu dibulatkan ke bilangan bulat terdekat. preset yang menghasilkan nilai density di bawah batas valid tidak tersedia. pada safety mode, input manual resolusi/density dikunci; saat safety mode dimatikan dari settings, aplikasi meminta konfirmasi peringatan dan membuka mode manual.
 
-setiap perubahan menyimpan state sebelumnya secara sinkron sebelum perintah `wm` dijalankan, menerapkan resolusi dan density sebagai dua langkah yang tetap dicoba secara terpisah, lalu memverifikasi nilai aktif. bila salah satu langkah atau verifikasi gagal, aplikasi mencoba memulihkan kedua nilai sebelumnya. setelah berhasil, service sesi ADB menjalankan rollback setelah 15 detik kecuali pengguna memilih pertahankan. tersedia dua jalur pemulihan: baseline tersimpan dan default sistem (`wm size reset` + `wm density reset`). permintaan putus ADB saat rollback tertunda ditunda sampai pemulihan berhasil; bila koneksi sedang terputus, service mempertahankan status sesi agar pengguna dapat menyambungkan ulang dan melanjutkan rollback. rollback tetap memerlukan perangkat dan sesi ADB yang dapat dijangkau; ini bukan jaminan pemulihan bila perangkat mati atau sistem menghentikan service secara permanen.
+setiap perubahan menerapkan resolusi dan density sebagai dua langkah yang tetap dicoba secara terpisah, lalu memverifikasi nilai aktif. bila salah satu langkah atau verifikasi gagal, aplikasi mencoba memulihkan kedua nilai sebelumnya. preset, pemulihan baseline, dan reset default sistem adalah tindakan terdefinisi: setelah diverifikasi, perubahan langsung dipertahankan tanpa rollback otomatis. hanya konfigurasi manual yang menyimpan state sebelumnya dan memulai countdown rollback 15 detik setelah target berhasil diterapkan dan diverifikasi; pengguna dapat memilih pertahankan sebelum waktu habis. bila pemulihan darurat setelah kegagalan perintah tidak berhasil, service dapat menyimpan percobaan pemulihan segera untuk diulang setelah ADB tersambung. permintaan putus ADB ketika rollback manual tertunda ditunda sampai pemulihan berhasil; rollback tetap memerlukan perangkat dan sesi ADB yang dapat dijangkau.
 
-baseline tidak dikarang bila `wm size`/`wm density` tidak mengembalikan nilai fisik yang dapat diparse. pembacaan ulang status tidak menimpa baseline yang sudah tersimpan. reset baseline memakai physical resolution serta logical density pertama yang disimpan.
+perkiraan smallest width dihitung dari sisi terpendek resolusi aktif × 160 / logical density; angka ini estimasi, bukan pembacaan langsung `Configuration.smallestScreenWidthDp`, karena window/insets dapat memengaruhi nilai yang dilihat aplikasi lain. density yang lebih rendah pada resolusi tetap menaikkan estimasi dp dan membuat elemen UI berbasis dp tampak lebih kecil. baseline tidak dikarang bila `wm size`/`wm density` tidak mengembalikan nilai fisik yang dapat diparse. pembacaan ulang status tidak menimpa baseline yang sudah tersimpan. reset baseline memakai physical resolution serta logical density pertama yang disimpan.
+
+## perubahan versi 1.2.0
+
+- preset, pulihkan baseline, dan reset default tidak lagi masuk countdown rollback; perubahan tersebut langsung dipertahankan setelah verifikasi. state rollback lama dari versi sebelumnya juga dibersihkan saat safety mode aktif, sedangkan state manual lama dipertahankan.
+- konfigurasi manual tetap memakai rollback 15 detik. countdown dimulai setelah perintah `wm` selesai dan target terverifikasi, bukan sebelum penerapan dimulai.
+- status dan preview menampilkan estimasi smallest width (dp) agar efek perubahan logical density terlihat sebelum diterapkan.
+- minimum android adalah android 12 / api 31.
+- perbaikan terminal sebelumnya tetap disertakan: Shell v2 PTY dicoba lebih dulu, dengan fallback ke legacy `shell:` bila inisialisasi Shell v2 gagal.
 
 ## alur pairing
 
@@ -103,12 +109,4 @@ proyek menggunakan [`adb-kt`](https://github.com/rhythmcache/adb-kt) `com.github
 
 ## verifikasi
 
-unit test tersedia untuk parsing endpoint adb, parsing daftar user dan package, parsing status display dan pemisahan physical/override, perhitungan skala, parsing counter cpu, dan klasifikasi command berisiko. setiap push dan pull request dijalankan lewat github actions: unit test, lalu build apk debug. status build terbaru ditampilkan di badge atas README.
-
-## kontribusi
-
-issue dan pull request terbuka. sebelum membuka pull request, jalankan `./gradlew testDebugUnitTest` dan pastikan workflow github actions hijau.
-
-## lisensi
-
-kode proyek ini dirilis di bawah [MIT License](LICENSE). font awesome mengikuti SIL Open Font License 1.1 (`FONT-AWESOME-NOTICE.txt`), dan `adb-kt` dirilis di bawah Apache-2.0.
+unit test tersedia untuk parsing endpoint adb, parsing daftar user/package, parsing status display dan pemisahan physical/override, perhitungan skala, parsing counter CPU, dan klasifikasi command berisiko. file project ini sudah diperiksa secara statis dan arsipnya diverifikasi; **build android penuh belum dapat dijalankan di lingkungan pembuat karena android sdk dan gradle tidak tersedia serta jaringan build dibatasi**. gunakan workflow github actions atau lingkungan android sdk untuk hasil kompilasi final dan pengujian pada perangkat nyata.

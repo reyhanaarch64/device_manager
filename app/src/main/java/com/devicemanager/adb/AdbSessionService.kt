@@ -38,6 +38,7 @@ class AdbSessionService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        DisplayRepository.migrateLegacyRollbackPolicy(this)
         val action = intent?.action
         if (action == ACTION_BEGIN_PAIR || action == ACTION_RECONNECT || action == ACTION_RESTORE) {
             AdbRuntime.setSessionEnabled(this, true)

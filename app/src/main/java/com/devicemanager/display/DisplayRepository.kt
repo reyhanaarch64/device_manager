@@ -17,6 +17,8 @@ object DisplayRepository {
     private const val KEY_BASELINE_DENSITY_OVERRIDE = "baseline_density_override"
     private const val KEY_PENDING_ROLLBACK = "pending_rollback"
     private const val KEY_PENDING_DEADLINE = "pending_rollback_deadline"
+    private const val KEY_ROLLBACK_POLICY_VERSION = "rollback_policy_version"
+    private const val ROLLBACK_POLICY_VERSION = 2
 
     data class Baseline(
         val width: Int,
@@ -34,6 +36,18 @@ object DisplayRepository {
 
     fun setSafetyMode(context: Context, enabled: Boolean): Boolean =
         preferences(context).edit().putBoolean("safety_mode", enabled).commit()
+
+    /**
+     * Before 1.2.0 every display operation created a timed rollback record. In safety mode,
+     * those legacy records can only belong to predefined actions, which are now persistent.
+     * Preserve legacy pending records in manual mode because they may protect custom values.
+     */
+    fun migrateLegacyRollbackPolicy(context: Context): Boolean {
+        val prefs = preferences(context)
+        if (prefs.getInt(KEY_ROLLBACK_POLICY_VERSION, 0) >= ROLLBACK_POLICY_VERSION) return true
+        if (safetyMode(context) && pendingRollback(context) != null && !clearPendingRollback(context)) return false
+        return prefs.edit().putInt(KEY_ROLLBACK_POLICY_VERSION, ROLLBACK_POLICY_VERSION).commit()
+    }
 
     fun baseline(context: Context): Baseline? {
         val prefs = preferences(context)
@@ -87,6 +101,7 @@ object DisplayRepository {
         height: Int,
         density: Int,
         previous: DisplayStatus,
+        autoRollbackOnSuccess: Boolean,
         rollbackWindowMs: Long = ROLLBACK_WINDOW_MS,
         resetSize: Boolean = false,
         resetDensity: Boolean = false
@@ -94,14 +109,18 @@ object DisplayRepository {
         if (width !in 240..10_000) return@withContext Result.failure(IllegalArgumentException("lebar harus 240–10000 px"))
         if (height !in 240..20_000) return@withContext Result.failure(IllegalArgumentException("tinggi harus 240–20000 px"))
         if (density !in 72..1_000) return@withContext Result.failure(IllegalArgumentException("density harus 72–1000"))
-        if (rollbackWindowMs !in 5_000L..60_000L) {
+        if (autoRollbackOnSuccess && rollbackWindowMs !in 5_000L..60_000L) {
             return@withContext Result.failure(IllegalArgumentException("jendela rollback harus 5–60 detik"))
         }
-        // Save a provisional recovery record before the first mutation. The actual 15-second
-        // user confirmation window starts only after both commands and verification finish.
-        val preparationDeadline = System.currentTimeMillis() + ROLLBACK_PREPARATION_GRACE_MS
-        if (!savePendingRollback(context, previous, preparationDeadline)) {
-            return@withContext Result.failure(IllegalStateException("state rollback gagal disimpan; perubahan display tidak dijalankan"))
+        // Only manual configuration needs a timed recovery record. Presets and explicit
+        // restore/reset actions are deterministic and must remain applied after verification.
+        // For manual changes, persist a provisional recovery record before mutation; replace
+        // its grace deadline with the real confirmation deadline after verification.
+        if (autoRollbackOnSuccess) {
+            val preparationDeadline = System.currentTimeMillis() + ROLLBACK_PREPARATION_GRACE_MS
+            if (!savePendingRollback(context, previous, preparationDeadline)) {
+                return@withContext Result.failure(IllegalStateException("state rollback gagal disimpan; perubahan display tidak dijalankan"))
+            }
         }
         val sizeCommand = if (resetSize) "wm size reset" else "wm size ${width}x${height}"
         val densityCommand = if (resetDensity) "wm density reset" else "wm density $density"
@@ -134,20 +153,20 @@ object DisplayRepository {
                     }
                 )
             }
-            // Start the full confirmation window after verification, not before the wm calls.
-            // Otherwise a slow shell/verification round trip can consume the entire window and
-            // cause the service to roll back immediately after an apparently successful apply.
-            val confirmedDeadline = System.currentTimeMillis() + rollbackWindowMs
-            check(updatePendingRollbackDeadline(context, confirmedDeadline)) {
-                "konfigurasi berubah, tetapi deadline rollback gagal disimpan; pemulihan otomatis tidak dapat dijamin"
+            if (autoRollbackOnSuccess) {
+                // Start the full confirmation window after verification, not before the wm calls.
+                val confirmedDeadline = System.currentTimeMillis() + rollbackWindowMs
+                check(updatePendingRollbackDeadline(context, confirmedDeadline)) {
+                    "konfigurasi berubah, tetapi deadline rollback gagal disimpan; pemulihan otomatis tidak dapat dijamin"
+                }
+                // The service owns the timer independently of this Compose screen's lifecycle.
+                AdbSessionService.scheduleDisplayRollback(context)
             }
-            // The service owns the timer independently of this Compose screen's lifecycle.
-            AdbSessionService.scheduleDisplayRollback(context)
             Result.success(after)
         } catch (failure: Throwable) {
             val rollback = restore(previous)
             val message = if (rollback.isSuccess) {
-                val cleared = clearPendingRollback(context)
+                val cleared = !autoRollbackOnSuccess || clearPendingRollback(context)
                 if (cleared) {
                     "penerapan gagal; konfigurasi sebelumnya sudah dipulihkan: ${failure.message ?: "perintah wm gagal"}"
                 } else {

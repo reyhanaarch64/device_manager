@@ -74,6 +74,7 @@ private val Danger = Color(0xFFFF7777)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
+        DisplayRepository.migrateLegacyRollbackPolicy(this)
         AdbRuntime.restorePaired(this)
         if (AdbRuntime.sessionEnabled(this) && AdbRuntime.state.value.phase !in setOf("pairing", "connecting") && !AdbRuntime.state.value.connected) {
             AdbSessionService.start(this, AdbSessionService.ACTION_RESTORE)
@@ -399,6 +400,7 @@ private fun DisplayScreen(safetyMode: Boolean, adbConnected: Boolean, notify: (S
     var queuedLabel by remember { mutableStateOf("preset") }
     var queuedResetSize by remember { mutableStateOf(false) }
     var queuedResetDensity by remember { mutableStateOf(false) }
+    var queuedAutoRollback by remember { mutableStateOf(false) }
     var pendingDeadline by remember { mutableLongStateOf(DisplayRepository.pendingRollback(context)?.deadlineEpochMs ?: 0L) }
     var secondsLeft by remember { mutableIntStateOf(0) }
     var displayFeedback by remember { mutableStateOf<String?>(null) }
@@ -478,11 +480,18 @@ private fun DisplayScreen(safetyMode: Boolean, adbConnected: Boolean, notify: (S
         }
     }
 
-    fun queueTarget(target: DisplayTarget, label: String, resetSize: Boolean = false, resetDensity: Boolean = false) {
+    fun queueTarget(
+        target: DisplayTarget,
+        label: String,
+        resetSize: Boolean = false,
+        resetDensity: Boolean = false,
+        autoRollback: Boolean = false
+    ) {
         queuedTarget = target
         queuedLabel = label
         queuedResetSize = resetSize
         queuedResetDensity = resetDensity
+        queuedAutoRollback = autoRollback
     }
 
     fun applyQueuedTarget() {
@@ -491,29 +500,38 @@ private fun DisplayScreen(safetyMode: Boolean, adbConnected: Boolean, notify: (S
         val label = queuedLabel
         val resetSize = queuedResetSize
         val resetDensity = queuedResetDensity
+        val autoRollback = queuedAutoRollback
         queuedTarget = null
         busy = true
         displayFeedback = "mengirim perintah resolusi dan density ke perangkat…"
         displayFeedbackIsError = false
         scope.launch {
             try {
-                // The repository persists a provisional recovery record before mutation,
-                // then starts the actual confirmation countdown after verification.
+                // Manual updates persist a provisional recovery record before mutation;
+                // the actual confirmation countdown starts after verification. Presets skip it.
                 val result = DisplayRepository.applyConfiguration(
                     context, target.width, target.height, target.density, before,
+                    autoRollbackOnSuccess = autoRollback,
                     rollbackWindowMs = DisplayRepository.ROLLBACK_WINDOW_MS,
                     resetSize = resetSize, resetDensity = resetDensity
                 )
                 if (result.isSuccess) {
                     status = result.getOrNull()
-                    pendingDeadline = DisplayRepository.pendingRollback(context)?.deadlineEpochMs ?: 0L
+                    pendingDeadline = if (autoRollback) DisplayRepository.pendingRollback(context)?.deadlineEpochMs ?: 0L else 0L
                     widthInput = target.width.toString()
                     heightInput = target.height.toString()
                     densityInput = target.density.toString()
-                    displayFeedback = "$label berhasil diverifikasi: ${target.width} × ${target.height} px, ${target.density} dpi. perubahan akan di-rollback otomatis dalam 15 detik bila tidak dipertahankan."
+                    val detail = if (autoRollback) {
+                        "konfigurasi manual; rollback otomatis 15 detik setelah verifikasi"
+                    } else "$label; tanpa rollback otomatis"
+                    displayFeedback = if (autoRollback) {
+                        "$label berhasil diverifikasi: ${target.width} × ${target.height} px, ${target.density} dpi. lu punya 15 detik untuk mempertahankan perubahan."
+                    } else {
+                        "$label berhasil diverifikasi: ${target.width} × ${target.height} px, ${target.density} dpi. perubahan langsung dipertahankan tanpa rollback otomatis."
+                    }
                     displayFeedbackIsError = false
-                    ActivityLogRepository.record(context, "display apply", "${target.width}x${target.height} · ${target.density} dpi", true, "$label; rollback otomatis dalam 15 detik")
-                    notify("konfigurasi diterapkan sementara; pertahankan dalam 15 detik")
+                    ActivityLogRepository.record(context, "display apply", "${target.width}x${target.height} · ${target.density} dpi", true, detail)
+                    notify(if (autoRollback) "konfigurasi manual diterapkan; pertahankan dalam 15 detik" else "$label berhasil diterapkan dan dipertahankan")
                 } else {
                     val reason = result.exceptionOrNull()?.message ?: "penerapan display gagal tanpa detail"
                     displayFeedback = "$label gagal diterapkan.\n$reason"
@@ -559,11 +577,13 @@ private fun DisplayScreen(safetyMode: Boolean, adbConnected: Boolean, notify: (S
                 InfoRow("logical density aktif", "${current.activeDensity} dpi")
                 InfoRow("physical density", "${current.physicalDensity} dpi")
                 InfoRow("override density", if (current.hasDensityOverride) "aktif" else "tidak ada")
+                InfoRow("perkiraan smallest width", "${current.estimatedSmallestWidthDp} dp")
             } ?: Text("status belum dibaca dari wm size dan wm density.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             baseline?.let {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .4f))
                 InfoRow("baseline tersimpan", "${it.width} × ${it.height} px")
                 InfoRow("density baseline", "${it.density} dpi")
+                InfoRow("smallest width baseline", "${DisplayScale.estimatedSmallestWidthDp(it.width, it.height, it.density)} dp")
             } ?: Text("baseline belum dapat dipastikan. preset dikunci sampai data fisik berhasil dibaca.", fontSize = 12.sp, color = Warn)
             SecondaryButton("baca ulang status wm", { scope.launch { reloadStatus() } }, modifier = Modifier.fillMaxWidth(), enabled = adbConnected && !busy)
             SecondaryButton("deteksi ulang baseline", { confirmBaselineRedetect = true }, modifier = Modifier.fillMaxWidth(), enabled = adbConnected && status != null && !busy && pendingDeadline == 0L)
@@ -578,10 +598,10 @@ private fun DisplayScreen(safetyMode: Boolean, adbConnected: Boolean, notify: (S
         }) {
             Text(
                 if (safetyMode) "mode aman membatasi perubahan ke preset yang dihitung dari baseline tersimpan. density manual dan resolusi manual dikunci."
-                else "mode manual aktif. lu dapat memasukkan resolusi dan density sendiri, tetapi validasi, konfirmasi, dan rollback tetap berlaku.",
+                else "mode manual aktif. lu dapat memasukkan resolusi dan density sendiri; konfigurasi manual divalidasi, dikonfirmasi, dan punya rollback 15 detik. preset terhitung tetap langsung dipertahankan.",
                 fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Text("density di sini adalah logical density Android untuk skala dp, bukan DPI fisik panel.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("density di sini adalah logical density Android untuk skala dp, bukan DPI fisik panel. pada resolusi tetap, density turun membuat smallest width (dp) naik sehingga elemen UI berbasis dp tampak lebih kecil; density naik membuat UI tampak lebih besar.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Panel("preset skala") {
             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
@@ -597,7 +617,8 @@ private fun DisplayScreen(safetyMode: Boolean, adbConnected: Boolean, notify: (S
             selectedTarget?.let { target ->
                 InfoRow("resolusi target", "${target.width} × ${target.height} px")
                 InfoRow("density target", "${target.density} dpi")
-                Text("target dihitung dari baseline tersimpan, bukan dari override aktif. lebar dan tinggi memakai faktor skala sama; pembulatan ke piksel terdekat.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                InfoRow("perkiraan smallest width", "${target.estimatedSmallestWidthDp} dp")
+                Text("target dihitung dari baseline tersimpan, bukan dari override aktif. lebar, tinggi, dan density memakai faktor skala sama; estimasi smallest width tetap relatif konsisten.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 PrimaryButton(
                     "terapkan preset ${ (selectedScale * 100).toInt() }%",
                     enabled = adbConnected && !busy && status != null && pendingDeadline == 0L,
@@ -621,6 +642,15 @@ private fun DisplayScreen(safetyMode: Boolean, adbConnected: Boolean, notify: (S
                     OutlinedTextField(heightInput, { heightInput = it.filter(Char::isDigit).take(5) }, Modifier.weight(1f), label = { Text("tinggi px") }, singleLine = true)
                 }
                 OutlinedTextField(densityInput, { densityInput = it.filter(Char::isDigit).take(4) }, Modifier.fillMaxWidth(), label = { Text("logical density") }, singleLine = true)
+                val manualWidth = widthInput.toIntOrNull()
+                val manualHeight = heightInput.toIntOrNull()
+                val manualDensity = densityInput.toIntOrNull()
+                if (manualWidth != null && manualWidth in 240..10_000 &&
+                    manualHeight != null && manualHeight in 240..20_000 &&
+                    manualDensity != null && manualDensity in 72..1_000
+                ) {
+                    InfoRow("perkiraan smallest width", "${DisplayScale.estimatedSmallestWidthDp(manualWidth, manualHeight, manualDensity)} dp")
+                }
                 PrimaryButton(
                     "terapkan resolusi + density manual",
                     enabled = adbConnected && !busy && pendingDeadline == 0L && widthInput.toIntOrNull() in 240..10_000 && heightInput.toIntOrNull() in 240..20_000 && densityInput.toIntOrNull() in 72..1_000,
@@ -629,7 +659,7 @@ private fun DisplayScreen(safetyMode: Boolean, adbConnected: Boolean, notify: (S
                         val w = widthInput.toIntOrNull() ?: return@PrimaryButton
                         val h = heightInput.toIntOrNull() ?: return@PrimaryButton
                         val d = densityInput.toIntOrNull() ?: return@PrimaryButton
-                        queueTarget(DisplayTarget(w, h, d, 1f), "konfigurasi manual")
+                        queueTarget(DisplayTarget(w, h, d, 1f), "konfigurasi manual", autoRollback = true)
                     }
                 )
             }
@@ -694,7 +724,7 @@ private fun DisplayScreen(safetyMode: Boolean, adbConnected: Boolean, notify: (S
                 })
             }
         }
-        Text("rollback 15 detik dijalankan oleh service sesi ADB dan statusnya disimpan. pemulihan tetap tidak bisa dijamin bila perangkat mati, proses/service dihentikan, atau koneksi wireless debugging putus. sambungkan kembali untuk melanjutkan rollback yang tertunda.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("rollback 15 detik hanya berlaku untuk konfigurasi manual. preset, pemulihan baseline, dan reset default sistem tidak di-rollback otomatis. bila pemulihan darurat setelah kegagalan perintah tertunda, sambungkan kembali sesi ADB agar service dapat mencoba lagi.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 
     if (confirmBaselineRedetect) AlertDialog(
@@ -737,7 +767,11 @@ private fun DisplayScreen(safetyMode: Boolean, adbConnected: Boolean, notify: (S
                         Text("sekarang: ${it.activeWidth} × ${it.activeHeight} px · ${it.activeDensity} dpi", fontSize = 12.sp)
                     }
                     Text("target: ${target.width} × ${target.height} px · ${target.density} dpi", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    Text("setelah diterapkan, lu punya 15 detik untuk mempertahankan perubahan. bila tidak, aplikasi mencoba rollback ke konfigurasi sebelumnya.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        if (queuedAutoRollback) "karena ini konfigurasi manual, setelah target terverifikasi lu punya 15 detik untuk mempertahankannya. bila tidak, aplikasi mengembalikan konfigurasi sebelumnya."
+                        else "ini preset atau tindakan pemulihan terdefinisi. setelah target terverifikasi, perubahan langsung dipertahankan tanpa rollback otomatis.",
+                        fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             },
             confirmButton = { TextButton(enabled = !busy, onClick = { applyQueuedTarget() }) { Text("terapkan", color = Danger) } },
@@ -1288,15 +1322,15 @@ private fun SettingsScreen(dark: Boolean, onDarkChange: (Boolean) -> Unit, accen
         }
         Panel("informasi") {
             InfoRow("aplikasi", "device manager")
-            InfoRow("versi", "1.1.0")
-            InfoRow("minimum android", "12.0 · api 31")
+            InfoRow("versi", "1.2.0")
+            InfoRow("minimum android", "12 · api 31")
             InfoRow("adb engine", "adb-kt · pure kotlin")
         }
     }
     if (confirmDisableSafety) AlertDialog(
         onDismissRequest = { confirmDisableSafety = false },
         title = { Text("nonaktifkan safety mode?") },
-        text = { Text("mode manual mengizinkan resolusi dan logical density diubah bebas dalam rentang valid. nilai yang keliru dapat membuat antarmuka terlalu kecil, terlalu besar, atau sulit dioperasikan. setiap perubahan tetap memerlukan konfirmasi dan rollback 15 detik, tetapi pemulihan tidak dijamin bila perangkat atau sesi ADB terputus.") },
+        text = { Text("mode manual mengizinkan resolusi dan logical density diubah dalam rentang valid. nilai yang keliru dapat membuat antarmuka terlalu kecil, terlalu besar, atau sulit dioperasikan. konfigurasi manual mendapat konfirmasi dan rollback 15 detik; preset terhitung tidak memakai rollback otomatis.") },
         confirmButton = { TextButton(onClick = { onSafetyModeChange(false); confirmDisableSafety = false }) { Text("nonaktifkan", color = Danger) } },
         dismissButton = { TextButton(onClick = { confirmDisableSafety = false }) { Text("tetap aktif") } }
     )

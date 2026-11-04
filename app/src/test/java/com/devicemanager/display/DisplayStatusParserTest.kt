@@ -11,6 +11,7 @@ class DisplayStatusParserTest {
         assertEquals(720, status.physicalWidth)
         assertEquals(1600, status.activeHeight)
         assertEquals(320, status.activeDensity)
+        assertEquals(360, status.estimatedSmallestWidthDp)
         assertFalse(status.hasSizeOverride)
         assertFalse(status.hasDensityOverride)
     }
@@ -35,11 +36,28 @@ class DisplayStatusParserTest {
         assertEquals(400, target.density)
     }
 
+    @Test fun smallestWidthEstimateTracksLogicalDensityDirection() {
+        assertEquals(360, DisplayScale.estimatedSmallestWidthDp(1080, 2400, 480))
+        assertEquals(411, DisplayScale.estimatedSmallestWidthDp(1080, 2400, 420))
+        assertEquals(480, DisplayScale.estimatedSmallestWidthDp(1080, 2400, 360))
+    }
+
+    @Test fun presetScalingKeepsEstimatedSmallestWidthConsistent() {
+        val baseline = DisplayScale.target(720, 1600, 320, 1f)
+        val scaled = DisplayScale.target(720, 1600, 320, .8f)
+        assertEquals(baseline.estimatedSmallestWidthDp, scaled.estimatedSmallestWidthDp)
+    }
+
     @Test fun scaleRoundingIsConsistent() {
         val target = DisplayScale.target(720, 1560, 500, .67f)
         assertEquals(482, target.width)
         assertEquals(1045, target.height)
         assertEquals(335, target.density)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun rejectsInvalidPresetBaseline() {
+        DisplayScale.target(200, 1600, 320, .8f)
     }
 
     @Test(expected = IllegalStateException::class)

@@ -15,6 +15,9 @@ data class DisplayStatus(
     val activeDensity: Int get() = overrideDensity ?: physicalDensity
     val hasSizeOverride: Boolean get() = overrideWidth != null && overrideHeight != null
     val hasDensityOverride: Boolean get() = overrideDensity != null
+    /** Approximation from active display pixels and logical density; app window insets may affect actual Configuration values. */
+    val estimatedSmallestWidthDp: Int
+        get() = DisplayScale.estimatedSmallestWidthDp(activeWidth, activeHeight, activeDensity)
 }
 
 object DisplayStatusParser {
@@ -59,12 +62,25 @@ object DisplayStatusParser {
 }
 
 /** Deterministic scale calculation: both dimensions and logical density use the same factor. */
-data class DisplayTarget(val width: Int, val height: Int, val density: Int, val scale: Float)
+data class DisplayTarget(val width: Int, val height: Int, val density: Int, val scale: Float) {
+    val estimatedSmallestWidthDp: Int
+        get() = DisplayScale.estimatedSmallestWidthDp(width, height, density)
+}
 
 object DisplayScale {
     val presets = listOf(1.00f, .90f, .80f, .75f, .67f, .50f)
 
+    /** Estimates shortest logical display dimension using px and logical density. */
+    fun estimatedSmallestWidthDp(widthPx: Int, heightPx: Int, densityDpi: Int): Int {
+        require(widthPx > 0 && heightPx > 0 && densityDpi > 0) { "dimensi dan density harus positif" }
+        return ((minOf(widthPx, heightPx) * 160f / densityDpi) + .5f).toInt()
+    }
+
     fun target(baselineWidth: Int, baselineHeight: Int, baselineDensity: Int, scale: Float): DisplayTarget {
+        require(baselineWidth in 240..10_000 && baselineHeight in 240..20_000) {
+            "baseline resolusi di luar rentang valid"
+        }
+        require(baselineDensity in 72..1_000) { "baseline density di luar rentang valid" }
         require(scale in .5f..1f && presets.any { it == scale }) { "preset skala tidak valid" }
         val width = ((baselineWidth * scale) + .5f).toInt()
         val height = ((baselineHeight * scale) + .5f).toInt()
