@@ -1,5 +1,7 @@
 # Device Manager Android
 
+[![android build](https://github.com/reyhanaarch64/device_manager/actions/workflows/android-build.yml/badge.svg)](https://github.com/reyhanaarch64/device_manager/actions/workflows/android-build.yml) [![license: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 aplikasi android native berbasis kotlin dan jetpack compose untuk memantau serta mengelola perangkat yang sedang menjalankan aplikasi. seluruh identitas perangkat dibaca saat runtime; tidak ada nama model, chipset, user id, resolusi, atau daftar aplikasi yang di-hardcode.
 
 ## fitur yang diimplementasikan
@@ -101,4 +103,12 @@ proyek menggunakan [`adb-kt`](https://github.com/rhythmcache/adb-kt) `com.github
 
 ## verifikasi
 
-unit test tersedia untuk parsing endpoint adb, parsing daftar user/package, parsing status display dan pemisahan physical/override, perhitungan skala, parsing counter CPU, dan klasifikasi command berisiko. file project ini sudah diperiksa secara statis dan arsipnya diverifikasi; **build android penuh belum dapat dijalankan di lingkungan pembuat karena android sdk dan gradle tidak tersedia serta jaringan build dibatasi**. gunakan workflow github actions atau lingkungan android sdk untuk hasil kompilasi final dan pengujian pada perangkat nyata.
+unit test tersedia untuk parsing endpoint adb, parsing daftar user dan package, parsing status display dan pemisahan physical/override, perhitungan skala, parsing counter cpu, dan klasifikasi command berisiko. setiap push dan pull request dijalankan lewat github actions: unit test, lalu build apk debug. status build terbaru ditampilkan di badge atas README.
+
+## kontribusi
+
+issue dan pull request terbuka. sebelum membuka pull request, jalankan `./gradlew testDebugUnitTest` dan pastikan workflow github actions hijau.
+
+## lisensi
+
+kode proyek ini dirilis di bawah [MIT License](LICENSE). font awesome mengikuti SIL Open Font License 1.1 (`FONT-AWESOME-NOTICE.txt`), dan `adb-kt` dirilis di bawah Apache-2.0.
