@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Typeface
 import android.content.pm.PackageManager
 import android.content.Intent
+import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
@@ -400,22 +401,33 @@ private fun DisplayScreen(safetyMode: Boolean, adbConnected: Boolean, notify: (S
     var queuedResetDensity by remember { mutableStateOf(false) }
     var pendingDeadline by remember { mutableLongStateOf(DisplayRepository.pendingRollback(context)?.deadlineEpochMs ?: 0L) }
     var secondsLeft by remember { mutableIntStateOf(0) }
+    var displayFeedback by remember { mutableStateOf<String?>(null) }
+    var displayFeedbackIsError by remember { mutableStateOf(false) }
+    val displayPrefs = remember(context) { DisplayRepository.preferences(context) }
     var confirmBaselineRedetect by remember { mutableStateOf(false) }
 
     suspend fun reloadStatus() {
         if (!adbConnected) return
         busy = true
-        val result = DisplayRepository.readStatus()
-        result.onSuccess { fresh ->
-            status = fresh
-            runCatching { DisplayRepository.captureBaselineIfMissing(context, fresh) }
-                .onSuccess { baseline = it }
-                .onFailure { notify(it.message ?: "baseline gagal disimpan; preset tetap dikunci") }
-            if (widthInput.isBlank()) widthInput = fresh.activeWidth.toString()
-            if (heightInput.isBlank()) heightInput = fresh.activeHeight.toString()
-            if (densityInput.isBlank()) densityInput = fresh.activeDensity.toString()
-        }.onFailure { notify(it.message ?: "gagal membaca status display") }
-        busy = false
+        try {
+            val result = DisplayRepository.readStatus()
+            result.onSuccess { fresh ->
+                status = fresh
+                runCatching { DisplayRepository.captureBaselineIfMissing(context, fresh) }
+                    .onSuccess { baseline = it }
+                    .onFailure { notify(it.message ?: "baseline gagal disimpan; preset tetap dikunci") }
+                if (widthInput.isBlank()) widthInput = fresh.activeWidth.toString()
+                if (heightInput.isBlank()) heightInput = fresh.activeHeight.toString()
+                if (densityInput.isBlank()) densityInput = fresh.activeDensity.toString()
+            }.onFailure {
+                status = null
+                displayFeedback = "status display gagal dibaca: ${it.message ?: "kesalahan tidak diketahui"}"
+                displayFeedbackIsError = true
+                notify(it.message ?: "gagal membaca status display")
+            }
+        } finally {
+            busy = false
+        }
     }
 
     LaunchedEffect(adbConnected) {
@@ -425,6 +437,24 @@ private fun DisplayScreen(safetyMode: Boolean, adbConnected: Boolean, notify: (S
                 AdbSessionService.scheduleDisplayRollback(context)
             }
         } else status = null
+    }
+
+
+    DisposableEffect(displayPrefs) {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+            val latestDeadline = DisplayRepository.pendingRollback(context)?.deadlineEpochMs ?: 0L
+            val hadPending = pendingDeadline > 0L
+            // Ignore the provisional recovery deadline while the apply transaction is running.
+            // The repository publishes the real confirmation deadline after verification.
+            if (!busy) pendingDeadline = latestDeadline
+            // The ADB foreground service can finish or clear the rollback record outside this
+            // composable. Observe the durable preference instead of keeping a stale local lock.
+            if (hadPending && latestDeadline == 0L && adbConnected && !busy) {
+                scope.launch { reloadStatus() }
+            }
+        }
+        displayPrefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { displayPrefs.unregisterOnSharedPreferenceChangeListener(listener) }
     }
 
     LaunchedEffect(pendingDeadline) {
@@ -441,7 +471,10 @@ private fun DisplayScreen(safetyMode: Boolean, adbConnected: Boolean, notify: (S
             reloadStatus()
             notify("countdown selesai; status pemulihan diperbarui")
         } else {
-            notify("waktu rollback habis, tetapi pemulihan belum terverifikasi; periksa koneksi adb")
+            val message = "waktu rollback habis, tetapi state pemulihan masih tersimpan. koneksi adb atau pemulihan perlu diperiksa sebelum perubahan display berikutnya."
+            displayFeedback = message
+            displayFeedbackIsError = true
+            notify(message)
         }
     }
 
@@ -455,33 +488,55 @@ private fun DisplayScreen(safetyMode: Boolean, adbConnected: Boolean, notify: (S
     fun applyQueuedTarget() {
         val target = queuedTarget ?: return
         val before = status ?: run { notify("status display belum terbaca"); return }
+        val label = queuedLabel
+        val resetSize = queuedResetSize
+        val resetDensity = queuedResetDensity
         queuedTarget = null
         busy = true
+        displayFeedback = "mengirim perintah resolusi dan density ke perangkat…"
+        displayFeedbackIsError = false
         scope.launch {
-            // Repository writes rollback state durably and schedules the service-owned timer
-            // before this composable scope can be cancelled by navigation.
-            val deadline = System.currentTimeMillis() + 15_000L
-            pendingDeadline = deadline
-            val result = DisplayRepository.applyConfiguration(
-                context, target.width, target.height, target.density, before, deadline,
-                resetSize = queuedResetSize, resetDensity = queuedResetDensity
-            )
-            if (result.isSuccess) {
-                status = result.getOrNull()
-                widthInput = target.width.toString()
-                heightInput = target.height.toString()
-                densityInput = target.density.toString()
-                ActivityLogRepository.record(context, "display apply", "${target.width}x${target.height} · ${target.density} dpi", true, "$queuedLabel; rollback otomatis dalam 15 detik")
-                notify("konfigurasi diterapkan sementara; pertahankan dalam 15 detik")
-            } else {
-                ActivityLogRepository.record(context, "display apply", "${target.width}x${target.height} · ${target.density} dpi", false, result.exceptionOrNull()?.message ?: "penerapan gagal")
-                notify(result.exceptionOrNull()?.message ?: "penerapan display gagal")
+            try {
+                // The repository persists a provisional recovery record before mutation,
+                // then starts the actual confirmation countdown after verification.
+                val result = DisplayRepository.applyConfiguration(
+                    context, target.width, target.height, target.density, before,
+                    rollbackWindowMs = DisplayRepository.ROLLBACK_WINDOW_MS,
+                    resetSize = resetSize, resetDensity = resetDensity
+                )
+                if (result.isSuccess) {
+                    status = result.getOrNull()
+                    pendingDeadline = DisplayRepository.pendingRollback(context)?.deadlineEpochMs ?: 0L
+                    widthInput = target.width.toString()
+                    heightInput = target.height.toString()
+                    densityInput = target.density.toString()
+                    displayFeedback = "$label berhasil diverifikasi: ${target.width} × ${target.height} px, ${target.density} dpi. perubahan akan di-rollback otomatis dalam 15 detik bila tidak dipertahankan."
+                    displayFeedbackIsError = false
+                    ActivityLogRepository.record(context, "display apply", "${target.width}x${target.height} · ${target.density} dpi", true, "$label; rollback otomatis dalam 15 detik")
+                    notify("konfigurasi diterapkan sementara; pertahankan dalam 15 detik")
+                } else {
+                    val reason = result.exceptionOrNull()?.message ?: "penerapan display gagal tanpa detail"
+                    displayFeedback = "$label gagal diterapkan.\n$reason"
+                    displayFeedbackIsError = true
+                    ActivityLogRepository.record(context, "display apply", "${target.width}x${target.height} · ${target.density} dpi", false, reason)
+                    notify(reason)
+                    val pending = DisplayRepository.pendingRollback(context)
+                    pendingDeadline = pending?.deadlineEpochMs ?: 0L
+                    if (pending != null && adbConnected) AdbSessionService.scheduleDisplayRollback(context)
+                    reloadStatus()
+                }
+            } catch (failure: Throwable) {
+                val reason = failure.message ?: failure::class.java.simpleName
+                displayFeedback = "operasi display terhenti: $reason"
+                displayFeedbackIsError = true
+                notify(reason)
                 val pending = DisplayRepository.pendingRollback(context)
                 pendingDeadline = pending?.deadlineEpochMs ?: 0L
-                if (pending != null && adbConnected) AdbSessionService.scheduleDisplayRollback(context)
-                reloadStatus()
+                if (pending != null && adbConnected) runCatching { AdbSessionService.scheduleDisplayRollback(context) }
+                runCatching { reloadStatus() }
+            } finally {
+                busy = false
             }
-            busy = false
         }
     }
 
@@ -512,6 +567,11 @@ private fun DisplayScreen(safetyMode: Boolean, adbConnected: Boolean, notify: (S
             } ?: Text("baseline belum dapat dipastikan. preset dikunci sampai data fisik berhasil dibaca.", fontSize = 12.sp, color = Warn)
             SecondaryButton("baca ulang status wm", { scope.launch { reloadStatus() } }, modifier = Modifier.fillMaxWidth(), enabled = adbConnected && !busy)
             SecondaryButton("deteksi ulang baseline", { confirmBaselineRedetect = true }, modifier = Modifier.fillMaxWidth(), enabled = adbConnected && status != null && !busy && pendingDeadline == 0L)
+        }
+        displayFeedback?.let { message ->
+            Panel(if (displayFeedbackIsError) "hasil penerapan display · gagal" else "hasil penerapan display") {
+                Text(message, fontSize = 12.sp, color = if (displayFeedbackIsError) Danger else MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
         Panel("safety mode", trailing = {
             Text(if (safetyMode) "aktif" else "nonaktif", color = if (safetyMode) Good else Warn, fontSize = 11.sp, fontWeight = FontWeight.Bold)
@@ -610,8 +670,8 @@ private fun DisplayScreen(safetyMode: Boolean, adbConnected: Boolean, notify: (S
                 Text("konfigurasi baru akan dipertahankan hanya setelah lu memilih tombol pertahankan. jika tidak, service ADB mencoba mengembalikan resolusi dan density sebelumnya.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 PrimaryButton("pertahankan perubahan", enabled = adbConnected && pendingDeadline > 0L && secondsLeft > 0, modifier = Modifier.fillMaxWidth(), onClick = {
                     AdbSessionService.keepDisplayConfiguration(context)
-                    pendingDeadline = 0L
-                    secondsLeft = 0
+                    displayFeedback = "permintaan mempertahankan konfigurasi dikirim. tombol pengaturan akan aktif kembali setelah service menghapus state rollback."
+                    displayFeedbackIsError = false
                     notify("permintaan mempertahankan konfigurasi dikirim ke service adb")
                 })
                 SecondaryButton("pulihkan sekarang", enabled = adbConnected && !busy, modifier = Modifier.fillMaxWidth(), danger = true, onClick = {
@@ -1073,7 +1133,11 @@ private fun TerminalScreen(notify: (String) -> Unit) {
         if (value.isBlank() || !terminalOpen) return
         scope.launch {
             val result = AdbRuntime.writeTerminalLine(value)
-            result.onFailure { notify(it.message ?: "gagal menulis ke terminal") }
+            result.onFailure {
+                val reason = it.message ?: "gagal menulis ke terminal"
+                appendOutput("\n[error menulis terminal: $reason]\n")
+                notify(reason)
+            }
             if (result.isSuccess) {
                 ActivityLogRepository.record(context, "terminal", "adb shell", true, "perintah dikirim ke PTY; isi perintah tidak disimpan")
             }
@@ -1081,7 +1145,7 @@ private fun TerminalScreen(notify: (String) -> Unit) {
     }
 
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        PageTitle("adb shell", "terminal PTY interaktif berbasis ADB Shell v2")
+        PageTitle("adb shell", "terminal PTY interaktif melalui ADB shell")
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             PrimaryButton(
                 if (starting) "membuka…" else if (terminalOpen) "terminal aktif" else "mulai terminal",
@@ -1093,7 +1157,7 @@ private fun TerminalScreen(notify: (String) -> Unit) {
                             result.fold(
                                 onSuccess = { flow ->
                                     terminalOpen = true
-                                    appendOutput("\n[terminal terhubung]\n")
+                                    appendOutput("\n[terminal terhubung · ${AdbRuntime.terminalProtocolLabel()}]\n")
                                     scope.launch {
                                         runCatching { flow.collect { chunk -> appendOutput(chunk) } }
                                             .onFailure { appendOutput("\n[error: ${it.message}]\n") }
@@ -1101,7 +1165,11 @@ private fun TerminalScreen(notify: (String) -> Unit) {
                                         appendOutput("\n[terminal ditutup]\n")
                                     }
                                 },
-                                onFailure = { notify(it.message ?: "gagal membuka terminal") }
+                                onFailure = {
+                                    val reason = it.message ?: "gagal membuka terminal"
+                                    appendOutput("\n[error membuka terminal: $reason]\n")
+                                    notify(reason)
+                                }
                             )
                             starting = false
                         }
@@ -1138,7 +1206,7 @@ private fun TerminalScreen(notify: (String) -> Unit) {
                 Text(output, fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 16.sp, color = Color(0xFFD2E4DA))
             }
         }
-        Text("terminal memakai PTY Shell v2 dan hak akses adbd (shell), bukan root. operasi yang mengubah sistem tetap memerlukan izin yang sesuai.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("terminal memakai PTY ADB (Shell v2 dengan fallback legacy) dan hak akses adbd (shell), bukan root. operasi yang mengubah sistem tetap memerlukan izin yang sesuai.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
     confirmCommand?.let { cmd ->
         AlertDialog(onDismissRequest = { confirmCommand = null }, title = { Text("perintah berisiko") }, text = {
@@ -1221,7 +1289,7 @@ private fun SettingsScreen(dark: Boolean, onDarkChange: (Boolean) -> Unit, accen
         Panel("informasi") {
             InfoRow("aplikasi", "device manager")
             InfoRow("versi", "1.1.0")
-            InfoRow("minimum android", "8.0 · api 26")
+            InfoRow("minimum android", "12.0 · api 31")
             InfoRow("adb engine", "adb-kt · pure kotlin")
         }
     }

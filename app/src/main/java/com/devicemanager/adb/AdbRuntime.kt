@@ -3,10 +3,12 @@ package com.devicemanager.adb
 import android.content.Context
 import io.github.rhythmcache.adb.AdbClient
 import io.github.rhythmcache.adb.AdbInteractiveSession
+import io.github.rhythmcache.adb.AdbStream
 import com.devicemanager.data.ActivityLogRepository
 import com.devicemanager.security.AndroidKeystoreAdbKeyProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -32,6 +34,9 @@ object AdbRuntime {
 
     @Volatile private var client: AdbClient? = null
     @Volatile private var terminalSession: AdbInteractiveSession? = null
+    @Volatile private var legacyTerminalStream: AdbStream? = null
+    @Volatile private var terminalWriter: (suspend (String) -> Unit)? = null
+    @Volatile private var terminalProtocol = "belum dibuka"
     @Volatile private var provider: AndroidKeystoreAdbKeyProvider? = null
     private val busy = AtomicBoolean(false)
 
@@ -145,30 +150,82 @@ object AdbRuntime {
             require(command.isNotBlank()) { "perintah kosong" }
             require(command.length <= 16_384) { "perintah terlalu panjang (maksimum 16 KB)" }
             val result = withTimeout(60_000) { active.shell(command) }
-            if (result.isSuccess) Result.success(result.stdoutText)
-            else Result.failure(IllegalStateException(result.stderrText.ifBlank { "perintah gagal (exit ${result.exitCode})" }))
+            if (result.isSuccess) {
+                Result.success(result.stdoutText)
+            } else {
+                val details = buildList {
+                    add("exit code ${result.exitCode}")
+                    result.stderrText.trim().takeIf { it.isNotEmpty() }?.let { add("stderr: $it") }
+                    result.stdoutText.trim().takeIf { it.isNotEmpty() }?.let { add("stdout: $it") }
+                }.joinToString("\n")
+                Result.failure(IllegalStateException("perintah adb gagal\n$details"))
+            }
         } catch (t: Throwable) {
             Result.failure(t)
         }
     }
 
-    /** Opens a persistent PTY Shell v2 session. Its output Flow is single-consumer. */
+    /** Opens a persistent PTY shell. Prefer Shell v2; use the AOSP legacy interactive service as fallback. */
     suspend fun openInteractiveTerminal(): Result<Flow<String>> = withContext(Dispatchers.IO) {
         val active = client ?: return@withContext Result.failure(IllegalStateException("belum ada koneksi adb aktif"))
-        try {
-            closeTerminalInternal()
-            val session = withTimeout(20_000) { active.openInteractiveShell(terminalType = "xterm-256color", rows = 32, cols = 100) }
-            terminalSession = session
-            Result.success(session.textFlow)
-        } catch (t: Throwable) {
-            Result.failure(t)
+        closeTerminalInternal()
+
+        val shellV2 = runCatching {
+            // Open the service directly instead of using openInteractiveShell(), so starting a
+            // shell does not depend on the optional initial window-size synchronization packet.
+            val stream = withTimeout(20_000) {
+                active.open("shell,v2,pty,TERM=xterm-256color:")
+            }
+            AdbInteractiveSession(stream)
         }
+
+        shellV2.fold(
+            onSuccess = { session ->
+                terminalSession = session
+                terminalWriter = { value -> session.writeUtf8(value) }
+                terminalProtocol = "Shell v2 · PTY"
+                Result.success(session.textFlow)
+            },
+            onFailure = { v2Failure ->
+                // AOSP documents `shell:` as the legacy interactive service. It allocates a PTY
+                // for an interactive shell and carries terminal bytes without Shell-v2 framing.
+                runCatching {
+                    withTimeout(20_000) { active.open("shell:") }
+                }.fold(
+                    onSuccess = { stream ->
+                        legacyTerminalStream = stream
+                        terminalWriter = { value -> stream.writeUtf8(value) }
+                        terminalProtocol = "legacy shell · PTY fallback"
+                        val output = flow {
+                            while (true) {
+                                val bytes = stream.recv() ?: break
+                                emit(String(bytes, Charsets.UTF_8))
+                            }
+                        }
+                        Result.success(output)
+                    },
+                    onFailure = { legacyFailure ->
+                        Result.failure(
+                            IllegalStateException(
+                                "gagal membuka terminal dengan Shell v2 maupun fallback legacy. " +
+                                    "Shell v2: ${v2Failure.message ?: v2Failure::class.java.simpleName}. " +
+                                    "Legacy shell: ${legacyFailure.message ?: legacyFailure::class.java.simpleName}",
+                                legacyFailure
+                            )
+                        )
+                    }
+                )
+            }
+        )
     }
 
+    fun terminalProtocolLabel(): String = terminalProtocol
+
     suspend fun writeTerminal(text: String): Result<Unit> = withContext(Dispatchers.IO) {
-        val active = terminalSession ?: return@withContext Result.failure(IllegalStateException("terminal belum dibuka"))
+        val writer = terminalWriter
+            ?: return@withContext Result.failure(IllegalStateException("terminal belum dibuka"))
         try {
-            withTimeout(10_000) { active.writeUtf8(text) }
+            withTimeout(10_000) { writer(text) }
             Result.success(Unit)
         } catch (t: Throwable) {
             Result.failure(t)
@@ -183,7 +240,11 @@ object AdbRuntime {
 
     private fun closeTerminalInternal() {
         terminalSession?.let { runCatching { it.close() } }
+        legacyTerminalStream?.let { runCatching { it.close() } }
         terminalSession = null
+        legacyTerminalStream = null
+        terminalWriter = null
+        terminalProtocol = "belum dibuka"
     }
 
     fun disconnect(context: Context) {

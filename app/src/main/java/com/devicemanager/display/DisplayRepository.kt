@@ -8,6 +8,8 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 object DisplayRepository {
+    const val ROLLBACK_WINDOW_MS = 15_000L
+    private const val ROLLBACK_PREPARATION_GRACE_MS = 120_000L
     private const val PREFS = "display_settings"
     private const val KEY_BASELINE_WIDTH = "baseline_width"
     private const val KEY_BASELINE_HEIGHT = "baseline_height"
@@ -85,14 +87,20 @@ object DisplayRepository {
         height: Int,
         density: Int,
         previous: DisplayStatus,
-        rollbackDeadlineEpochMs: Long,
+        rollbackWindowMs: Long = ROLLBACK_WINDOW_MS,
         resetSize: Boolean = false,
         resetDensity: Boolean = false
     ): Result<DisplayStatus> = withContext(NonCancellable) {
         if (width !in 240..10_000) return@withContext Result.failure(IllegalArgumentException("lebar harus 240–10000 px"))
         if (height !in 240..20_000) return@withContext Result.failure(IllegalArgumentException("tinggi harus 240–20000 px"))
         if (density !in 72..1_000) return@withContext Result.failure(IllegalArgumentException("density harus 72–1000"))
-        if (!savePendingRollback(context, previous, rollbackDeadlineEpochMs)) {
+        if (rollbackWindowMs !in 5_000L..60_000L) {
+            return@withContext Result.failure(IllegalArgumentException("jendela rollback harus 5–60 detik"))
+        }
+        // Save a provisional recovery record before the first mutation. The actual 15-second
+        // user confirmation window starts only after both commands and verification finish.
+        val preparationDeadline = System.currentTimeMillis() + ROLLBACK_PREPARATION_GRACE_MS
+        if (!savePendingRollback(context, previous, preparationDeadline)) {
             return@withContext Result.failure(IllegalStateException("state rollback gagal disimpan; perubahan display tidak dijalankan"))
         }
         val sizeCommand = if (resetSize) "wm size reset" else "wm size ${width}x${height}"
@@ -102,14 +110,38 @@ object DisplayRepository {
             // attempted; the catch path then restores the complete previous configuration.
             val sizeResult = AdbRuntime.shell(sizeCommand)
             val densityResult = AdbRuntime.shell(densityCommand)
-            sizeResult.getOrThrow()
-            densityResult.getOrThrow()
-            val after = DisplayStatusParser.parse(AdbRuntime.shell("wm size; wm density").getOrThrow())
-            check(after.activeWidth == width && after.activeHeight == height && after.activeDensity == density) {
-                "android tidak menerapkan seluruh target display"
+            val commandErrors = buildList {
+                sizeResult.exceptionOrNull()?.let { add("wm size: ${it.message ?: "gagal"}") }
+                densityResult.exceptionOrNull()?.let { add("wm density: ${it.message ?: "gagal"}") }
             }
-            // The rollback record is durable before the first wm command. Schedule its
-            // owner before returning so leaving this screen cannot cancel the safety job.
+            if (commandErrors.isNotEmpty()) throw IllegalStateException(commandErrors.joinToString("\n"))
+            val sizeOutput = sizeResult.getOrThrow()
+            val densityOutput = densityResult.getOrThrow()
+            val verificationOutput = AdbRuntime.shell("wm size; wm density").getOrThrow()
+            val after = DisplayStatusParser.parse(verificationOutput)
+            if (after.activeWidth != width || after.activeHeight != height || after.activeDensity != density) {
+                throw IllegalStateException(
+                    buildString {
+                        append("verifikasi display tidak cocok dengan target. target: ")
+                        append("${width}x${height} @ ${density} dpi; aktual: ")
+                        append("${after.activeWidth}x${after.activeHeight} @ ${after.activeDensity} dpi")
+                        append("\nkeluaran wm size: ")
+                        append(sizeOutput.trim().ifBlank { "(kosong)" })
+                        append("\nkeluaran wm density: ")
+                        append(densityOutput.trim().ifBlank { "(kosong)" })
+                        append("\nstatus verifikasi: ")
+                        append(verificationOutput.trim())
+                    }
+                )
+            }
+            // Start the full confirmation window after verification, not before the wm calls.
+            // Otherwise a slow shell/verification round trip can consume the entire window and
+            // cause the service to roll back immediately after an apparently successful apply.
+            val confirmedDeadline = System.currentTimeMillis() + rollbackWindowMs
+            check(updatePendingRollbackDeadline(context, confirmedDeadline)) {
+                "konfigurasi berubah, tetapi deadline rollback gagal disimpan; pemulihan otomatis tidak dapat dijamin"
+            }
+            // The service owns the timer independently of this Compose screen's lifecycle.
             AdbSessionService.scheduleDisplayRollback(context)
             Result.success(after)
         } catch (failure: Throwable) {
@@ -199,6 +231,12 @@ object DisplayRepository {
         )
         PendingRollback(status, deadline)
     }.getOrNull()
+
+    fun updatePendingRollbackDeadline(context: Context, deadlineEpochMs: Long): Boolean {
+        val prefs = preferences(context)
+        if (prefs.getString(KEY_PENDING_ROLLBACK, null) == null || deadlineEpochMs <= 0L) return false
+        return prefs.edit().putLong(KEY_PENDING_DEADLINE, deadlineEpochMs).commit()
+    }
 
     fun clearPendingRollback(context: Context): Boolean = preferences(context).edit()
         .remove(KEY_PENDING_ROLLBACK)
